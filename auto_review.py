@@ -1415,6 +1415,21 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
                  pr.number, review["decision"],
                  review.get("addresses_prior_block"), artifact.name)
 
+    # If no code changed AND the verdict is identical to the prior one,
+    # there's nothing new to publish — re-posting the same summary on
+    # the same code is noise. Skip the GitHub post but still record the
+    # reconsider in state so the watermark advances and we don't keep
+    # re-running on the same author activity.
+    new_decision = (review.get("decision") or "").lower()
+    if not forced and not code_changed and new_decision == prior_decision:
+        logging.info(
+            "PR #%s: verdict unchanged (%s) and no code changes; skipping post",
+            pr.number, new_decision,
+        )
+        _record_reconsider(state, pr, review, review_id=None,
+                           activity=activity, dry_run=True)
+        return f"reconsidered-noop:{new_decision}"
+
     review_id: str | None = None
     if dry_run:
         print("\n" + "-" * 78)
