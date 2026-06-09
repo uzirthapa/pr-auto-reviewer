@@ -1297,11 +1297,23 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
 
     activity = fetch_pr_activity_since(repo, pr.number, last_action_iso)
     head_changed = pr.head_sha != prev.get("head_sha")
+    prior_decision = (prev.get("decision") or "").lower()
+    code_changed = head_changed or bool(activity.get("new_commits"))
 
     if not forced and not head_changed and not activity_warrants_reconsider(activity):
         logging.info("PR #%s: no new activity since %s; skipping reconsider",
                      pr.number, last_action_iso)
         return "skip-no-activity"
+
+    # If we already approved this PR, only re-review when CODE has changed.
+    # A reply or re-request alone shouldn't make us re-approve an
+    # already-approved PR — there's nothing new to evaluate.
+    if not forced and prior_decision == "approve" and not code_changed:
+        logging.info(
+            "PR #%s: already approved and no code changes since %s; skipping reconsider",
+            pr.number, last_action_iso,
+        )
+        return "skip-already-approved-no-code-change"
 
     logging.info(
         "PR #%s: reconsidering (since %s) — head_changed=%s, rerequests=%d, "
