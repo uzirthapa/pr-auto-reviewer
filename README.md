@@ -89,3 +89,33 @@ Environment variables:
 - `COPILOT_REVIEW_MODEL` (default `claude-opus-4.7-1m-internal`)
 - `COPILOT_REVIEW_EFFORT` (default `high`)
 - `COPILOT_REVIEW_TIMEOUT` seconds (default `900`)
+
+## Daily morning report
+A second Scheduled Task emails a summary of the prior 24 hours of reviews
+(decisions, distinct PRs, issues raised, blocks issued/lifted, per-PR
+activity) to your inbox at 07:00 local time via Outlook COM (uses your
+already-signed-in Outlook profile — no auth setup needed).
+
+Preview only (writes HTML to a file, doesn't send):
+```
+python send_daily_report.py --dry-run --verbose
+```
+
+Send now (live):
+```
+python send_daily_report.py --verbose
+```
+
+Register / unregister the 07:00 daily task:
+```
+.\register_daily_report_task.ps1                 # default 07:00 daily
+.\register_daily_report_task.ps1 -At "08:30"     # custom time
+.\register_daily_report_task.ps1 -Unregister
+```
+
+Environment variables:
+- `REPORT_RECIPIENT` (default `uzirthapa@microsoft.com`)
+- `REPORT_HOURS` window in hours (default `24`)
+
+Logs go to `daily_report.log`. Source data is `reviews/metrics.jsonl`
+appended by `auto_review.py` every cycle.

@@ -1,6 +1,8 @@
 # Runtime state and artifacts — environment specific, not source.
 state.json
 auto_review.log
+daily_report.log
+daily_report.html
 reviews/
 full_dryrun.out
 
