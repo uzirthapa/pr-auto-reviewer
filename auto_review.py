@@ -298,7 +298,7 @@ JSON to stdout. After writing the file, your job is done. The JSON must
 match this schema:
 
 {
-  "decision": "approve" | "request_changes" | "comment",
+  "decision": "approve" | "request_changes",
   "summary": "<3-8 sentence overall review covering correctness, architecture, and risk>",
   "comments": [
     {
@@ -367,17 +367,46 @@ Review priorities (in order):
      deserialization, XSS, prototype pollution.
   8. Test coverage proportional to risk -- not "add a test" boilerplate.
 
-Decision rubric:
-  - "request_changes" ONLY when there is a concrete correctness, security,
-    architecture, or duplication problem that the author must fix before
-    merge. Always explain exactly what is wrong and what the fix should
-    look like.
-  - "approve" when the change is sound and any remaining notes are
-    optional improvements. You may still leave a few comments.
-  - "comment" when there are useful observations but nothing blocking,
-    OR when you're flagging suspected duplication / perf / cyclic-import
-    that you can't fully confirm from the diff alone (ask the author to
-    confirm).
+Decision rubric (BINARY — bias toward APPROVE):
+  - "approve" is the DEFAULT. Approve when:
+      * the change works and isn't breaking anything, OR
+      * the only issues you found are minor (style, nits, defensive
+        cleanups, "consider refactoring", "this could be more readable",
+        small perf wins, suggested rename, missing JSDoc, etc.).
+    You may still leave 0..many comments under an approve — tag each
+    with severity="optional" so the author knows they're not blocking.
+
+  - "request_changes" ONLY for material problems, specifically:
+      * a real functional bug (wrong control flow, wrong API contract,
+        null-deref, race, off-by-one with user-visible impact)
+      * a regression that breaks existing behavior or callers
+      * a security issue (auth bypass, injection, secret leak, unsafe
+        deserialization, missing validation on a trust boundary)
+      * data loss or data corruption (writes the wrong thing, mutates
+        shared state unsafely, silently drops events)
+      * an architectural violation that will cause real harm if shipped
+        (e.g. circular dependency that breaks the build / tree-shake;
+        leaking a layer concern across a hard boundary; duplicating
+        infrastructure that already exists and creating a fork)
+      * a clear performance regression that will be felt at runtime
+        (NOT micro-perf or theoretical concerns)
+    When you block, at least one comment MUST be severity="required"
+    and must concretely describe the problem and the expected fix.
+
+Things that are NEVER reasons to request changes (leave as optional
+comments under an approve instead):
+  - naming, formatting, comments, JSDoc, log strings
+  - "this could be cleaner / extracted / split / inlined"
+  - speculative perf concerns you can't quantify
+  - missing tests for code paths that already worked
+  - suspected duplication you can't prove from the diff (ask the author
+    as an optional question)
+  - style preferences, opinions about React/TS idioms
+  - one-off typos in non-user-facing strings
+
+If you're on the fence — approve. The author can read your optional
+comments and decide. Blocking should require a concrete, articulable,
+material problem.
 
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
@@ -391,11 +420,12 @@ Strict rules for comments:
   - For suspected duplication you can't fully prove from the diff, phrase
     the comment as a question to the author ("Does `packages/common/...`
     already expose something like this? If so, please reuse it; if not,
-    consider lifting this there.") rather than as a fact.
+    consider lifting this there.") and mark it severity="optional" — never
+    block on suspicion alone.
   - Never invent code that is not in the diff.
 
-Write the JSON object to `review_output.json` now. If you are unsure,
-use decision="comment".
+Write the JSON object to `review_output.json` now. Default to approve
+unless you have a concrete, material problem to point at.
 """
 
 
@@ -473,8 +503,16 @@ def _validate_review(obj: Any) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise ValueError("review must be a JSON object")
     decision = obj.get("decision")
-    if decision not in ("approve", "request_changes", "comment"):
+    # Verdict is binary: approve or request_changes. Coerce any legacy
+    # "comment" output from the model into "approve" — if it weren't
+    # blocking it doesn't deserve to hold up the PR. The caller still
+    # gets the model's comments (now tagged severity="optional").
+    if decision == "comment":
+        logging.info("Model returned legacy 'comment' verdict; coercing to 'approve'.")
+        decision = "approve"
+    if decision not in ("approve", "request_changes"):
         raise ValueError(f"invalid decision: {decision!r}")
+    obj["decision"] = decision
     summary = (obj.get("summary") or "").strip()
     if not summary:
         raise ValueError("missing summary")
@@ -860,7 +898,7 @@ You MUST write your response as a JSON object to a file named
 JSON to stdout. The JSON must match this schema:
 
 {
-  "decision": "approve" | "request_changes" | "comment",
+  "decision": "approve" | "request_changes",
   "summary": "<3-8 sentences: what changed since your last review and why
               your decision stands or has changed>",
   "comments": [
@@ -889,16 +927,25 @@ no single anchor (rare).
   - null  if your prior decision was not "request_changes" (so there was
           nothing to "address").
 
-Decision rubric:
-  - "approve" if the PR is in a mergeable state given the current diff
-    and the author's responses. If the prior decision was a block, the
-    author must have plausibly resolved every concrete concern (via code
-    change or a convincing explanation that proves the concern was wrong
-    or out of scope).
-  - "request_changes" if at least one blocking concern is unresolved or
-    a new blocking concern surfaced in the latest commits. Be specific.
-  - "comment" if you have useful observations but nothing is blocking
-    and approval would be premature.
+Decision rubric (BINARY — bias toward APPROVE):
+  - "approve" is the DEFAULT. Approve when:
+      * the PR is in a mergeable state given the current diff and the
+        author's responses, OR
+      * remaining concerns are minor (style, nits, "consider X",
+        suggested refactors, micro-perf, missing doc).
+    If the prior decision was a block, the author must have plausibly
+    resolved every MATERIAL concern (via code change or a convincing
+    explanation that proves the concern was wrong or out of scope).
+    Surviving nit-level concerns are fine — re-tag them severity="optional".
+  - "request_changes" ONLY if a MATERIAL blocking concern (real
+    functional bug, breaking change, security issue, data loss, harmful
+    architectural violation, real perf regression) is unresolved or a
+    new one surfaced in the latest commits. Tag the blocking comment(s)
+    severity="required" and concretely describe the problem and the fix.
+
+Do not keep the block alive just because some nits remain — if nothing
+material is broken, approve and let the author take or leave the
+optional notes.
 
 Rules:
   - Engage with what the author actually said. Quote a short snippet of
@@ -1029,7 +1076,6 @@ def format_reconsider_body(pr: PullRequest, review: dict[str, Any],
     verb = {
         "approve": "lifting prior block — approving",
         "request_changes": "block stands",
-        "comment": "no change to prior block",
     }[review["decision"]]
     header = (
         "🤖 **Automated re-review** (Copilot CLI)\n\n"
