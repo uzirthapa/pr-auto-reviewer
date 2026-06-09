@@ -499,18 +499,24 @@ def parse_review_json(text: str, validator=None) -> dict[str, Any]:
     raise ValueError(f"could not parse JSON from copilot output: {text[:300]!r}")
 
 
-def _validate_review(obj: Any) -> dict[str, Any]:
+def _validate_review(obj: Any, *, allow_comment: bool = False) -> dict[str, Any]:
     if not isinstance(obj, dict):
         raise ValueError("review must be a JSON object")
     decision = obj.get("decision")
-    # Verdict is binary: approve or request_changes. Coerce any legacy
-    # "comment" output from the model into "approve" — if it weren't
-    # blocking it doesn't deserve to hold up the PR. The caller still
-    # gets the model's comments (now tagged severity="optional").
-    if decision == "comment":
-        logging.info("Model returned legacy 'comment' verdict; coercing to 'approve'.")
-        decision = "approve"
-    if decision not in ("approve", "request_changes"):
+    # Initial reviews are binary (approve / request_changes). Reconsiders
+    # additionally allow "comment" to drop a prior block without
+    # endorsing the PR (used when the author gave a rationale we don't
+    # fully agree with but no longer want to block on).
+    valid: tuple[str, ...]
+    if allow_comment:
+        valid = ("approve", "request_changes", "comment")
+    else:
+        valid = ("approve", "request_changes")
+        # Legacy coercion for initial reviews only.
+        if decision == "comment":
+            logging.info("Model returned legacy 'comment' verdict on initial review; coercing to 'approve'.")
+            decision = "approve"
+    if decision not in valid:
         raise ValueError(f"invalid decision: {decision!r}")
     obj["decision"] = decision
     summary = (obj.get("summary") or "").strip()
@@ -528,8 +534,6 @@ def _validate_review(obj: Any) -> dict[str, Any]:
             continue
         sev = (c.get("severity") or "").strip().lower()
         if sev not in ("required", "optional"):
-            # Sensible default: if the model blocked, unlabeled comments
-            # are treated as required; otherwise optional.
             sev = "required" if decision == "request_changes" else "optional"
         entry: dict[str, Any] = {
             "file": (c.get("file") or "").strip(),
@@ -543,6 +547,13 @@ def _validate_review(obj: Any) -> dict[str, Any]:
             entry["line"] = int(ln.strip())
         norm.append(entry)
     return {"decision": decision, "summary": summary, "comments": norm}
+
+
+def _validate_reconsider_NEW_REMOVED(obj: Any) -> dict[str, Any]:
+    """Removed — see _validate_reconsider near line 1095, which is the
+    real one. Kept as a NotImplementedError stub so a future drift loud-
+    fails instead of silently shadowing."""
+    raise NotImplementedError("use _validate_reconsider() near line 1095")
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +774,50 @@ def find_my_latest_review_id(repo: str, pr_number: int) -> str | None:
     return str(rid) if rid is not None else None
 
 
+def find_my_latest_blocking_review_id(repo: str, pr_number: int) -> str | None:
+    """Return the id of my most recently-submitted CHANGES_REQUESTED
+    review on this PR, if it's still active (not already DISMISSED)."""
+    me = get_viewer_login()
+    owner, name = repo.split("/", 1)
+    try:
+        res = gh([
+            "api", f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
+            "--paginate",
+        ])
+        reviews = json.loads(res.stdout or "[]")
+    except Exception:
+        return None
+    mine_blocking = [
+        r for r in reviews
+        if ((r.get("user") or {}).get("login") == me)
+        and r.get("state") == "CHANGES_REQUESTED"
+        and r.get("submitted_at")
+    ]
+    if not mine_blocking:
+        return None
+    mine_blocking.sort(key=lambda r: r.get("submitted_at") or "", reverse=True)
+    rid = mine_blocking[0].get("id")
+    return str(rid) if rid is not None else None
+
+
+def dismiss_review(repo: str, pr_number: int, review_id: str,
+                   message: str) -> bool:
+    """PUT /repos/.../pulls/{n}/reviews/{id}/dismissals to release a prior
+    CHANGES_REQUESTED block. Returns True on success."""
+    owner, name = repo.split("/", 1)
+    payload = {"message": message, "event": "DISMISS"}
+    try:
+        gh([
+            "api", f"repos/{owner}/{name}/pulls/{pr_number}/reviews/{review_id}/dismissals",
+            "-X", "PUT", "--input", "-",
+        ], input_text=json.dumps(payload))
+        return True
+    except Exception as exc:
+        logging.warning("Failed to dismiss review %s on PR #%s: %s",
+                        review_id, pr_number, exc)
+        return False
+
+
 def fetch_pr_activity_since(repo: str, pr_number: int, since_iso: str
                             ) -> dict[str, Any]:
     """Return everything potentially relevant since `since_iso`:
@@ -904,7 +959,7 @@ You MUST write your response as a JSON object to a file named
 JSON to stdout. The JSON must match this schema:
 
 {
-  "decision": "approve" | "request_changes",
+  "decision": "approve" | "request_changes" | "comment",
   "summary": "<3-8 sentences: what changed since your last review and why
               your decision stands or has changed>",
   "comments": [
@@ -927,35 +982,56 @@ no single anchor (rare).
 
 `addresses_prior_block`:
   - true  if your prior decision was "request_changes" and the author has
-          now resolved every blocking concern.
+          now resolved every blocking concern (via code change OR a
+          convincing rationale).
   - false if your prior decision was "request_changes" and at least one
-          blocking concern remains.
+          blocking concern remains AND the author has not given a
+          plausible rationale to drop it.
   - null  if your prior decision was not "request_changes" (so there was
           nothing to "address").
 
-Decision rubric (BINARY — bias toward APPROVE):
-  - "approve" is the DEFAULT. Approve when:
-      * the PR is in a mergeable state given the current diff and the
-        author's responses, OR
-      * remaining concerns are minor (style, nits, "consider X",
-        suggested refactors, micro-perf, missing doc).
-    If the prior decision was a block, the author must have plausibly
-    resolved every MATERIAL concern (via code change or a convincing
-    explanation that proves the concern was wrong or out of scope).
-    Surviving nit-level concerns are fine — re-tag them severity="optional".
-  - "request_changes" ONLY if a MATERIAL blocking concern (real
-    functional bug, breaking change, security issue, data loss, harmful
-    architectural violation, real perf regression) is unresolved or a
-    new one surfaced in the latest commits. Tag the blocking comment(s)
-    severity="required" and concretely describe the problem and the fix.
+Decision rubric (THREE STATES — bias toward APPROVE; reserve
+"request_changes" for material unresolved blockers):
 
-Do not keep the block alive just because some nits remain — if nothing
-material is broken, approve and let the author take or leave the
-optional notes.
+  - "approve": the PR is in a mergeable state given the current diff and
+    the author's responses. Surviving concerns are nits / style /
+    "consider X" / micro-perf / missing doc — re-tag them
+    severity="optional". This is the DEFAULT.
+
+  - "comment": ONLY valid when your prior decision was "request_changes"
+    AND the author has responded with a rationale that you DO NOT fully
+    agree with, but which is plausible enough that you no longer want to
+    block the PR. Use "comment" to drop the block while recording your
+    disagreement. Quote the author's reply, explain concretely why you
+    still have reservations, then defer to the author. Do not use
+    "comment" if you actually agree with the author (use "approve") or
+    if the rationale is empty / non-responsive / clearly wrong (use
+    "request_changes").
+
+  - "request_changes": a MATERIAL blocking concern (real functional bug,
+    breaking change, security issue, data loss, harmful architectural
+    violation, real perf regression) is unresolved AND the author has
+    either not responded to it OR their response does not plausibly
+    address it. Tag the blocking comment(s) severity="required" and
+    concretely describe the problem and the fix. Do not keep the block
+    alive just because nits remain.
+
+State machine when prior decision was "request_changes":
+  1. Read every author reply (inline + issue comments) carefully.
+  2. For each blocking concern from your prior review, classify the
+     author's response as: ADDRESSED (code change or convincing
+     rationale), DISPUTED (rationale exists but you disagree),
+     IGNORED (no response or non-responsive).
+  3. If ALL blockers are ADDRESSED → "approve".
+  4. If at least one is IGNORED OR clearly wrong → "request_changes".
+  5. If the only remaining blockers are DISPUTED (author gave a
+     plausible reason, you still disagree) → "comment" — drop the
+     block, record disagreement, defer to the author.
 
 Rules:
   - Engage with what the author actually said. Quote a short snippet of
-    their reply when refuting it. Do not just restate your prior review.
+    their reply when refuting or agreeing with it. Do not just restate
+    your prior review.
   - Do not invent new nitpicks unrelated to the new activity unless the
     new commits introduced them.
   - If the diff was truncated, say so and scope accordingly.
@@ -1064,7 +1140,7 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
 
 
 def _validate_reconsider(obj: Any) -> dict[str, Any]:
-    base = _validate_review(obj)
+    base = _validate_review(obj, allow_comment=True)
     apb = obj.get("addresses_prior_block", None)
     if apb is None:
         base["addresses_prior_block"] = None
@@ -1361,6 +1437,25 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
         review_id = submit_review_via_api(repo, pr, review, body)
         logging.info("Posted reconsider %s on PR #%s (review_id=%s, inline=%d, general=%d)",
                      review["decision"], pr.number, review_id, len(inline), len(general))
+
+        # If we just transitioned from request_changes -> comment, the
+        # author gave a rationale we don't fully agree with but we no
+        # longer want to block. A COMMENT review alone may not clear the
+        # prior CHANGES_REQUESTED on branch-protection rules, so
+        # explicitly dismiss our last blocking review.
+        if (review["decision"] == "comment"
+                and (prev.get("decision") or "").lower() == "request_changes"):
+            blocking_id = find_my_latest_blocking_review_id(repo, pr.number)
+            if blocking_id and blocking_id != str(review_id):
+                ok = dismiss_review(
+                    repo, pr.number, blocking_id,
+                    message=("Dropping prior changes-requested in favor of a "
+                             "comment-only review — author provided a rationale "
+                             "I don't fully agree with but won't block on. "
+                             "See follow-up review for details."),
+                )
+                logging.info("Dismissed prior blocking review %s on PR #%s: %s",
+                             blocking_id, pr.number, "ok" if ok else "FAILED")
 
     _record_reconsider(state, pr, review, review_id, activity, dry_run)
     return f"reconsidered:{review['decision']}"
