@@ -1071,32 +1071,11 @@ def _validate_reconsider(obj: Any) -> dict[str, Any]:
     return base
 
 
-def format_reconsider_body(pr: PullRequest, review: dict[str, Any],
-                           prior_decision: str) -> str:
-    verb = {
-        "approve": "lifting prior block — approving",
-        "request_changes": "block stands",
-    }[review["decision"]]
-    header = (
-        "🤖 **Automated re-review** (Copilot CLI)\n\n"
-        f"_Prior decision: `{prior_decision}` → now: **{verb}**_  \n"
-        f"_Model: `{COPILOT_MODEL}` · effort: `{COPILOT_EFFORT}` · "
-        f"HEAD: `{pr.head_sha[:10]}`_\n\n"
-    )
-    parts = [header, "### Summary\n", review["summary"].rstrip() + "\n"]
-    if review.get("remaining_concerns"):
-        parts.append("\n### Remaining concerns\n")
-        for r in review["remaining_concerns"]:
-            parts.append(f"- {r}\n")
-    if review["comments"]:
-        parts.append("\n### Notes\n")
-        for c in review["comments"]:
-            loc = f"`{c['file']}`" if c["file"] else "(general)"
-            parts.append(f"- **{loc}** — {c['body']}\n")
-    parts.append(
-        "\n---\n_Automated re-review triggered by author activity since the prior review._\n"
-    )
-    return "".join(parts)
+def format_reconsider_body_LEGACY_REMOVED(pr, review, prior_decision):
+    """Removed: superseded by format_reconsider_body at line 654 which
+    supports general_comments + the new binary verdict. Stub kept only so
+    line numbers stay stable for nearby references."""
+    raise NotImplementedError("use format_reconsider_body() at line ~654")
 
 
 def run_copilot_review_call(prompt: str,
