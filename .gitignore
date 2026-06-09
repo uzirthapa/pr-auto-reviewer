@@ -1,0 +1,18 @@
+# Runtime state and artifacts — environment specific, not source.
+state.json
+auto_review.log
+reviews/
+full_dryrun.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
