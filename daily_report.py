@@ -157,16 +157,14 @@ def render_html(records: list[dict], hours: int) -> str:
         f'{decision_counts.get("comment", 0)} commented</span>'
     )
 
-    # Reasoning detail: show why we blocked / commented on each PR. Always
-    # include request_changes; include comment too (it's often "almost
-    # approved but…" context that's useful). Approves are skipped here to
-    # keep the body short — the table above already shows them.
+    # Reasoning detail: show why we blocked each PR. Only request_changes
+    # is included — approves and comments are summarized in the table.
     reason_blocks: list[str] = []
     for n in sorted(by_pr.keys(), key=lambda n: by_pr[n]["latest"]["_ts"], reverse=True):
         slot = by_pr[n]
         latest = slot["latest"]
         decision = latest.get("decision")
-        if decision == "approve":
+        if decision != "request_changes":
             continue
         summary = load_summary_for(latest)
         if not summary:
@@ -192,10 +190,10 @@ def render_html(records: list[dict], hours: int) -> str:
     reasoning_html = ""
     if reason_blocks:
         reasoning_html = (
-            '<h3 style="margin:22px 0 6px 0;">Why each PR wasn\'t approved</h3>'
+            '<h3 style="margin:22px 0 6px 0;">Why each PR was blocked (request changes)</h3>'
             '<p style="color:#57606a;margin-top:0;font-size:13px;">'
-            'Summary the model wrote for every PR that got REQUEST CHANGES or COMMENT. '
-            'Approves are omitted; see the table above for the full list.</p>'
+            'Summary the model wrote for every PR that got REQUEST CHANGES. '
+            'Approves and comment-only reviews are omitted; see the table above.</p>'
             + "".join(reason_blocks)
         )
 
