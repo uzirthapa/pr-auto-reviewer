@@ -37,7 +37,9 @@ $action = New-ScheduledTaskAction `
     -Argument "`"$pyScript`"" `
     -WorkingDirectory $scriptDir
 
-$trigger = New-ScheduledTaskTrigger -Daily -At $At
+$trigger = New-ScheduledTaskTrigger -Weekly `
+    -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday `
+    -At $At
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -63,6 +65,6 @@ Register-ScheduledTask `
     -Principal $principal `
     -Description "Emails the agentic-automations auto-review daily report at $At." | Out-Null
 
-Write-Host "Registered task '$TaskName' (daily at $At)."
+Write-Host "Registered task '$TaskName' (Mon-Fri at $At)."
 Write-Host "Command: $python `"$pyScript`""
 Write-Host "Logs   : $(Join-Path $scriptDir 'daily_report.log')"

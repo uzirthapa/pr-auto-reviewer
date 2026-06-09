@@ -105,6 +105,9 @@ def main() -> int:
     ap.add_argument("--output", default=None,
                     help="When --dry-run, write HTML here (default: ./daily_report.html).")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--include-weekends", action="store_true",
+                    help="Send even on Saturday/Sunday (default: skip weekends "
+                         "for live sends; --dry-run always runs).")
     args = ap.parse_args()
 
     setup_logging(args.verbose)
@@ -120,7 +123,14 @@ def main() -> int:
         logging.info("DRY-RUN: report written to %s (open in a browser to preview)", out_path)
         return 0
 
-    subject = f"Auto-review report — {datetime.now().strftime('%a %b %d %Y')}"
+    # weekday() -> Mon=0 ... Sun=6. Skip Sat (5) and Sun (6) unless overridden.
+    today = datetime.now()
+    if today.weekday() >= 5 and not args.include_weekends:
+        logging.info("Skipping send: today is %s (use --include-weekends to override).",
+                     today.strftime("%A"))
+        return 0
+
+    subject = f"Auto-review report — {today.strftime('%a %b %d %Y')}"
     send_via_outlook(html, args.recipient, subject)
     return 0
 

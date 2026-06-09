@@ -202,6 +202,46 @@ def list_open_prs(repo: str) -> list[PullRequest]:
     return prs
 
 
+def _build_diff_from_files_api(repo: str, pr_number: int) -> tuple[str, bool]:
+    """Fallback when `gh pr diff` rejects the PR (HTTP 406: >300 files).
+
+    Uses the Files API (paginated) and reconstructs a unified diff from each
+    file's `patch`. Returns (diff_text, truncated_flag). `truncated_flag` is
+    True when we hit MAX_DIFF_CHARS while concatenating.
+    """
+    res = gh(
+        ["api", "--paginate", f"repos/{repo}/pulls/{pr_number}/files?per_page=100"],
+        timeout=180,
+    )
+    try:
+        # --paginate concatenates JSON arrays; gh returns one merged array.
+        files = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        files = []
+    chunks: list[str] = []
+    total = 0
+    truncated = False
+    for f in files:
+        patch = f.get("patch")
+        filename = f.get("filename", "<unknown>")
+        if not patch:
+            # Binary, renamed-only, or omitted by API. Still record the file.
+            header = f"diff --git a/{filename} b/{filename}\n(no patch available: status={f.get('status')}, +{f.get('additions',0)}/-{f.get('deletions',0)})\n"
+            chunk = header
+        else:
+            chunk = (
+                f"diff --git a/{filename} b/{filename}\n"
+                f"--- a/{filename}\n+++ b/{filename}\n"
+                f"{patch}\n"
+            )
+        if total + len(chunk) > MAX_DIFF_CHARS:
+            truncated = True
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return "".join(chunks), truncated
+
+
 def hydrate_pr(repo: str, pr: PullRequest) -> None:
     """Attach file list and unified diff to a PR."""
     # Files list (path + additions/deletions). Cap for prompt size.
@@ -216,15 +256,29 @@ def hydrate_pr(repo: str, pr: PullRequest) -> None:
         files = []
     pr.files = files[:MAX_FILES_LISTED]
 
-    # Unified diff.
-    diff_res = gh(["pr", "diff", str(pr.number), "--repo", repo], timeout=180)
-    diff = diff_res.stdout or ""
-    if len(diff) > MAX_DIFF_CHARS:
-        pr.diff = diff[:MAX_DIFF_CHARS]
-        pr.diff_truncated = True
-    else:
-        pr.diff = diff
-        pr.diff_truncated = False
+    # Unified diff. Fall back to Files API when the PR exceeds the 300-file
+    # `gh pr diff` cap (HTTP 406).
+    try:
+        diff_res = gh(["pr", "diff", str(pr.number), "--repo", repo], timeout=180)
+        diff = diff_res.stdout or ""
+        if len(diff) > MAX_DIFF_CHARS:
+            pr.diff = diff[:MAX_DIFF_CHARS]
+            pr.diff_truncated = True
+        else:
+            pr.diff = diff
+            pr.diff_truncated = False
+    except RuntimeError as e:
+        msg = str(e)
+        if "HTTP 406" in msg or "exceeded the maximum number of files" in msg:
+            logging.warning(
+                "PR #%d diff too large for `gh pr diff`; falling back to Files API",
+                pr.number,
+            )
+            diff_text, truncated = _build_diff_from_files_api(repo, pr.number)
+            pr.diff = diff_text
+            pr.diff_truncated = truncated or True  # mega-PR: always flag
+        else:
+            raise
 
 
 # ---------------------------------------------------------------------------

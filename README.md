@@ -106,12 +106,16 @@ Send now (live):
 python send_daily_report.py --verbose
 ```
 
-Register / unregister the 07:00 daily task:
+Register / unregister the 07:00 weekday task (Mon-Fri only — weekends are skipped):
 ```
-.\register_daily_report_task.ps1                 # default 07:00 daily
+.\register_daily_report_task.ps1                 # default 07:00 Mon-Fri
 .\register_daily_report_task.ps1 -At "08:30"     # custom time
 .\register_daily_report_task.ps1 -Unregister
 ```
+
+The script also has a safety net: a live send (`python send_daily_report.py`)
+on a Saturday or Sunday no-ops with a log line. Pass `--include-weekends` to
+override. `--dry-run` always renders regardless of day.
 
 Environment variables:
 - `REPORT_RECIPIENT` (default `uzirthapa@microsoft.com`)

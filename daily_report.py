@@ -18,12 +18,34 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 METRICS = SCRIPT_DIR / "reviews" / "metrics.jsonl"
+REVIEWS_DIR = SCRIPT_DIR / "reviews"
 
 VERDICT_BADGE = {
     "approve":         '<span style="color:#1a7f37;font-weight:600;">✅ APPROVE</span>',
     "request_changes": '<span style="color:#cf222e;font-weight:600;">🛑 REQUEST CHANGES</span>',
     "comment":         '<span style="color:#9a6700;font-weight:600;">💬 COMMENT</span>',
 }
+
+
+def load_summary_for(rec: dict) -> str:
+    """Load the human-readable summary text the model wrote for a review.
+
+    The metrics record only stores counts; the full review (decision +
+    summary + inline comments) is in `reviews/<artifact_path>`. Returns
+    an empty string if the artifact is missing or malformed.
+    """
+    art = rec.get("artifact_path")
+    if not art:
+        return ""
+    p = REVIEWS_DIR / art
+    if not p.exists():
+        return ""
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+    review = data.get("review") or {}
+    return (review.get("summary") or "").strip()
 
 
 def load_records(hours: int) -> list[dict]:
@@ -135,6 +157,48 @@ def render_html(records: list[dict], hours: int) -> str:
         f'{decision_counts.get("comment", 0)} commented</span>'
     )
 
+    # Reasoning detail: show why we blocked / commented on each PR. Always
+    # include request_changes; include comment too (it's often "almost
+    # approved but…" context that's useful). Approves are skipped here to
+    # keep the body short — the table above already shows them.
+    reason_blocks: list[str] = []
+    for n in sorted(by_pr.keys(), key=lambda n: by_pr[n]["latest"]["_ts"], reverse=True):
+        slot = by_pr[n]
+        latest = slot["latest"]
+        decision = latest.get("decision")
+        if decision == "approve":
+            continue
+        summary = load_summary_for(latest)
+        if not summary:
+            continue
+        url = latest.get("pr_url") or "#"
+        title = escape(latest.get("pr_title") or "")
+        author = escape(latest.get("pr_author") or "?")
+        verdict = VERDICT_BADGE.get(decision, escape(decision or "?"))
+        issues = latest.get("issues_count") or 0
+        # Render summary as paragraphs, preserving the model's line breaks.
+        paragraphs = [escape(p).replace("\n", "<br/>") for p in summary.split("\n\n") if p.strip()]
+        body_html = "".join(f'<p style="margin:6px 0;">{p}</p>' for p in paragraphs)
+        reason_blocks.append(f"""
+<div style="border:1px solid #d0d7de;border-radius:6px;padding:12px 16px;margin:10px 0;background:#fafbfc;">
+  <div style="margin-bottom:6px;">
+    {verdict} &nbsp;
+    <a href="{escape(url)}" style="font-weight:600;text-decoration:none;color:#0969da;">#{n}</a>
+    <span style="color:#57606a;"> · {author}{(' · ' + str(issues) + ' issue(s)') if issues else ''}</span>
+    {(' · <span style="color:#57606a;">' + title + '</span>') if title else ''}
+  </div>
+  <div style="color:#1f2328;font-size:14px;line-height:1.45;">{body_html}</div>
+</div>""")
+    reasoning_html = ""
+    if reason_blocks:
+        reasoning_html = (
+            '<h3 style="margin:22px 0 6px 0;">Why each PR wasn\'t approved</h3>'
+            '<p style="color:#57606a;margin-top:0;font-size:13px;">'
+            'Summary the model wrote for every PR that got REQUEST CHANGES or COMMENT. '
+            'Approves are omitted; see the table above for the full list.</p>'
+            + "".join(reason_blocks)
+        )
+
     return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#1f2328;max-width:980px;">
 <h2 style="margin-bottom:4px;">🤖 Agentic-Automations Auto-Review — daily report</h2>
 <p style="color:#57606a;margin-top:0;">Window: last {hours}h (as of {escape(now_local)}).</p>
@@ -177,6 +241,8 @@ def render_html(records: list[dict], hours: int) -> str:
   </thead>
   <tbody>{''.join(rows_html)}</tbody>
 </table>
+
+{reasoning_html}
 
 <p style="color:#57606a;font-size:12px;margin-top:18px;">
   Sourced from <code>reviews\\metrics.jsonl</code>. Full text of each review lives in <code>reviews\\pr-&lt;num&gt;-&lt;sha&gt;.json</code> next to it.
