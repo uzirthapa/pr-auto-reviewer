@@ -304,10 +304,25 @@ match this schema:
     {
       "file": "<path relative to repo root, MUST appear in the diff>",
       "line": <integer line number from the RIGHT side of the diff (the new file). Pick the most relevant added/context line within the hunk where the issue lives.>,
+      "severity": "required" | "optional",
       "body": "<actionable, file/line-specific comment>"
     }
   ]
 }
+
+`severity` per comment:
+  - "required" = must be addressed before merge. Correctness bugs, data
+    loss, security issues, breaking contracts, missing error handling that
+    will cause crashes, architectural violations that will compound. If
+    your overall decision is "request_changes", at least one comment MUST
+    be "required" (otherwise the block has no teeth).
+  - "optional" = nit, style, micro-perf, defensive suggestion, "consider
+    extracting", refactor idea, or anything you'd be fine merging without.
+    Authors should feel free to ignore optional comments.
+
+Be honest about the split. Don't mark everything required (that's noise).
+Don't mark everything optional either — if something is actually wrong,
+say so plainly.
 
 PREFER inline comments tied to a specific file + line. Every issue you raise
 should land on the most relevant added or context line in the new file
@@ -473,7 +488,16 @@ def _validate_review(obj: Any) -> dict[str, Any]:
         body = (c.get("body") or "").strip()
         if not body:
             continue
-        entry: dict[str, Any] = {"file": (c.get("file") or "").strip(), "body": body}
+        sev = (c.get("severity") or "").strip().lower()
+        if sev not in ("required", "optional"):
+            # Sensible default: if the model blocked, unlabeled comments
+            # are treated as required; otherwise optional.
+            sev = "required" if decision == "request_changes" else "optional"
+        entry: dict[str, Any] = {
+            "file": (c.get("file") or "").strip(),
+            "body": body,
+            "severity": sev,
+        }
         ln = c.get("line")
         if isinstance(ln, int) and ln > 0:
             entry["line"] = ln
@@ -531,6 +555,19 @@ def parse_diff_right_lines(diff: str) -> dict[str, set[int]]:
     return valid
 
 
+_SEVERITY_PREFIX = {
+    "required": "**🔴 Required:** ",
+    "optional": "**🟡 Optional:** ",
+}
+
+
+def _decorate_body(c: dict[str, Any]) -> str:
+    """Prepend a Required / Optional badge to the comment body."""
+    body = c.get("body", "") or ""
+    prefix = _SEVERITY_PREFIX.get(c.get("severity", "required"), _SEVERITY_PREFIX["required"])
+    return prefix + body
+
+
 def _split_inline_vs_general(review: dict[str, Any],
                              valid: dict[str, set[int]]) -> tuple[list[dict], list[dict]]:
     """Map model comments to inline review comments + general fallbacks."""
@@ -539,7 +576,7 @@ def _split_inline_vs_general(review: dict[str, Any],
     for c in review.get("comments", []):
         f = (c.get("file") or "").strip()
         ln = c.get("line")
-        body = c.get("body", "")
+        body = _decorate_body(c)
         if f and isinstance(ln, int) and ln in valid.get(f, set()):
             inline.append({"path": f, "line": ln, "side": "RIGHT", "body": body})
         else:
@@ -830,6 +867,7 @@ JSON to stdout. The JSON must match this schema:
     {
       "file": "<path that appears in the diff>",
       "line": <integer RIGHT-side line number from the current diff hunk>,
+      "severity": "required" | "optional",
       "body": "<actionable, file/line-specific comment>"
     }
   ],
