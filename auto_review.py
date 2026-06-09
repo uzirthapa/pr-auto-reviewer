@@ -269,19 +269,46 @@ Review priorities (in order):
   2. Architecture / design soundness: is this the right layer? Does it
      respect existing abstractions, or shoehorn logic where it doesn't
      belong? Will it cause coupling, duplication, or fragile invariants?
-  3. Failure modes & edge cases: empty/undefined inputs, network failure,
+  3. Reuse over reinvention: if the diff introduces a utility, hook,
+     reducer, telemetry helper, retry wrapper, fetch wrapper, debounce,
+     deep-clone, type guard, etc. that looks generic, FLAG IT and ask
+     the author to confirm there isn't already an equivalent in a
+     shared package (e.g. `packages/common`, `packages/shared`, an
+     existing `utils/`, a fluentui/lodash primitive). Name the likely
+     existing home if you can guess from imports / naming patterns in
+     the diff. If there's a clearly-named duplicate already imported
+     elsewhere in the same diff, call it out as a hard duplication.
+  4. Performance: O(n²) loops over arrays that can be large, repeated
+     work that should be memoized, blocking the event loop with sync
+     I/O or heavy CPU, unnecessary re-renders (React: missing
+     `useMemo`/`useCallback`, new object/array literals in props,
+     unstable refs, context value churn), wasteful network round-trips
+     (N+1 fetches, missing batching/dedup), large bundles introduced
+     by importing whole libraries when a single helper would do.
+  5. Circular references / cyclic dependencies: `import A` ↔ `import B`
+     between modules (often shows up as undefined-at-import-time), and
+     reference cycles in long-lived objects (parent ↔ child holders,
+     subscriptions never torn down, event-listener closures pinning
+     state) that risk memory leaks. Call out both the cyclic import
+     pair and what to do (lift a shared type to a third module, invert
+     the dependency, weak-ref / explicit dispose).
+  6. Failure modes & edge cases: empty/undefined inputs, network failure,
      concurrent calls, tenant/locale boundaries, telemetry impact.
-  4. Security & privacy: leaked secrets, PII, missing authz, unsafe
+  7. Security & privacy: leaked secrets, PII, missing authz, unsafe
      deserialization, XSS, prototype pollution.
-  5. Test coverage proportional to risk -- not "add a test" boilerplate.
+  8. Test coverage proportional to risk -- not "add a test" boilerplate.
 
 Decision rubric:
   - "request_changes" ONLY when there is a concrete correctness, security,
-    or architecture problem that the author must fix before merge. Always
-    explain exactly what is wrong and what the fix should look like.
+    architecture, or duplication problem that the author must fix before
+    merge. Always explain exactly what is wrong and what the fix should
+    look like.
   - "approve" when the change is sound and any remaining notes are
     optional improvements. You may still leave a few comments.
-  - "comment" when there are useful observations but nothing blocking.
+  - "comment" when there are useful observations but nothing blocking,
+    OR when you're flagging suspected duplication / perf / cyclic-import
+    that you can't fully confirm from the diff alone (ask the author to
+    confirm).
 
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
@@ -292,6 +319,10 @@ Strict rules for comments:
     large or risky PRs.
   - If the diff was truncated, say so in the summary and scope the review
     to what you saw.
+  - For suspected duplication you can't fully prove from the diff, phrase
+    the comment as a question to the author ("Does `packages/common/...`
+    already expose something like this? If so, please reuse it; if not,
+    consider lifting this there.") rather than as a fact.
   - Never invent code that is not in the diff.
 
 Write the JSON object to `review_output.json` now. If you are unsure,
