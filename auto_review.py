@@ -862,9 +862,14 @@ def fetch_pr_activity_since(repo: str, pr_number: int, since_iso: str
 
 
 def activity_warrants_reconsider(activity: dict[str, Any]) -> bool:
-    """Cheap heuristic so we don't burn Copilot calls on noise."""
-    if activity.get("rerequests"):
-        return True
+    """Cheap heuristic so we don't burn Copilot calls on noise.
+
+    A re-review request alone (with the same HEAD, no new author replies,
+    no new commits) is NOT enough — the author already saw our last
+    review and nothing has actually changed since. Re-answering would be
+    spam. Re-requests count only when paired with new author activity or
+    a HEAD bump (HEAD-changed is checked separately by the caller).
+    """
     if activity.get("new_commits"):
         return True
     if activity.get("issue_comments"):
@@ -872,6 +877,7 @@ def activity_warrants_reconsider(activity: dict[str, Any]) -> bool:
     for rc in activity.get("review_comments", []):
         if rc.get("in_reply_to_id") is not None or rc.get("body"):
             return True
+    # rerequests is intentionally NOT a standalone trigger anymore.
     return False
 
 
