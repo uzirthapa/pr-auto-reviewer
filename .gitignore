@@ -2,6 +2,7 @@
 state.json
 auto_review.log
 daily_report.log
+rerun_comment_verdicts.log
 daily_report.html
 reviews/
 full_dryrun.out
