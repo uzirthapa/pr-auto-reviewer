@@ -1,0 +1,15 @@
+{
+  "gh_host": "microsoft.ghe.com",
+  "repo": "your-org/your-repo",
+  "report_recipient": "you@yourcompany.com",
+  "codebase_description": "a TypeScript / React / Node monorepo for <product name and what it does>",
+  "review_focus": [
+    "API contracts between the frontend and backend — flag any drift",
+    "Telemetry: ensure new error paths emit a corresponding warning event"
+  ],
+  "review_avoid": [
+    "Storybook story formatting",
+    "translation file ordering"
+  ],
+  "reviewer_style": "Be direct and senior-engineer terse. Prefer one concrete fix over three vague suggestions. Never ask the author to 'consider' something without saying what and why."
+}

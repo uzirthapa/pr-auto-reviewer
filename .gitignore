@@ -6,6 +6,9 @@ daily_report.html
 reviews/
 full_dryrun.out
 
+# Per-installation config (use config.example.json as a template).
+config.json
+
 # Python
 __pycache__/
 *.pyc

@@ -18,11 +18,15 @@ from datetime import datetime
 from pathlib import Path
 
 from daily_report import render_html, load_records
+import config as _user_config
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_PATH = SCRIPT_DIR / "daily_report.log"
 
-DEFAULT_RECIPIENT = os.environ.get("REPORT_RECIPIENT", "uzirthapa@microsoft.com")
+DEFAULT_RECIPIENT = os.environ.get(
+    "REPORT_RECIPIENT",
+    _user_config.get("report_recipient", "uzirthapa@microsoft.com"),
+)
 SEND_TIMEOUT = int(os.environ.get("REPORT_TIMEOUT", "120"))
 
 

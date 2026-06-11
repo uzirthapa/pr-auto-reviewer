@@ -1,11 +1,14 @@
 # Agentic Automations Auto-Review
 
-Python tooling that auto-reviews open PRs on
-`microsoft.ghe.com/bic/agentic-automations` **where the authenticated user is
-a requested reviewer** (i.e., the same PRs you'd see in your GitHub
-"Awaiting your review" list). Python handles all GitHub I/O via `gh`; the
-only thing handed to `copilot` is the reasoning task, with a strict JSON
-contract.
+Python tooling that auto-reviews open PRs on a GitHub (or GitHub Enterprise)
+repo **where the authenticated user is a requested reviewer** (i.e., the
+same PRs you'd see in your "Awaiting your review" list). Python handles
+all GitHub I/O via `gh`; the only thing handed to `copilot` is the
+reasoning task, with a strict JSON contract.
+
+> Originally built for `microsoft.ghe.com/bic/agentic-automations`; now
+> configurable so any team can stand up their own instance against any
+> repo. See **Sharing this with your team** below.
 
 ## What it does each cycle
 For every open, non-draft PR that has me on the reviewers list, the script
@@ -123,3 +126,63 @@ Environment variables:
 
 Logs go to `daily_report.log`. Source data is `reviews/metrics.jsonl`
 appended by `auto_review.py` every cycle.
+
+## Sharing this with your team
+
+Anything codebase-specific (host, repo, reviewer prompt focus,
+things-to-ignore, recipient email) lives in `config.json` next to the
+scripts. The code itself is generic.
+
+To onboard a teammate:
+
+1. They clone the repo:
+   ```pwsh
+   git clone <this repo url>
+   cd CodeReviewAgentDesigner
+   ```
+2. They run the interactive wizard:
+   ```pwsh
+   python setup.py
+   ```
+   It checks prereqs (`gh`, `copilot`, `python`, `gh auth`), then asks
+   them about:
+   - GitHub host + repo to review
+   - Daily-summary recipient email
+   - One-sentence codebase description (injected into the reviewer prompt)
+   - Focus areas the reviewer should ALWAYS look for
+   - Things the reviewer should NEVER comment on
+   - Reviewer voice / style preferences
+
+   It writes `config.json` and optionally registers the two Windows
+   scheduled tasks for them.
+3. They dry-run:
+   ```pwsh
+   python auto_review.py --dry-run --verbose
+   ```
+4. Once they like the artifacts in `reviews/`, they register the live task:
+   ```pwsh
+   .\register_scheduled_task.ps1 -Live
+   .\register_daily_report_task.ps1
+   ```
+
+### Walk-through skill
+
+A Copilot CLI skill ships with the repo at
+`.copilot/skills/setup-auto-reviewer/SKILL.md`. After cloning, copy or
+symlink it into your user skills folder (`%USERPROFILE%\.copilot\skills\`)
+and ask Copilot CLI:
+> "Help me set up the auto-reviewer"
+
+The skill conducts the interview conversationally (one question per turn,
+reflecting answers back) and synthesizes `config.json` directly, then
+walks through dry-run validation and scheduling.
+
+### Files that ship; files that are per-install
+
+| Ships in git                                            | Per-install (gitignored)                |
+| ------------------------------------------------------- | --------------------------------------- |
+| `auto_review.py`, `send_daily_report.py`, `daily_report.py`, `setup.py`, `config.py`, `rerun_comment_verdicts.py` | `config.json`                           |
+| `register_scheduled_task.ps1`, `register_daily_report_task.ps1` | `state.json`                            |
+| `config.example.json`                                   | `auto_review.log`, `daily_report.log`   |
+| `.copilot/skills/setup-auto-reviewer/SKILL.md`          | `reviews/` (artifacts + `metrics.jsonl`) |
+| `README.md`, `.gitignore`                               |                                          |

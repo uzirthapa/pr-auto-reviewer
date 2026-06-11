@@ -45,12 +45,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import config as _user_config
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-GH_HOST = "microsoft.ghe.com"
-DEFAULT_REPO = "bic/agentic-automations"
+# Per-install overrides come from config.json (written by setup.py).
+# Defaults preserve the original behavior so existing installs keep working.
+GH_HOST = _user_config.get("gh_host", "microsoft.ghe.com")
+DEFAULT_REPO = _user_config.get("repo", "bic/agentic-automations")
 
 # Cap on diff size sent to the model (characters). Very large PRs are
 # truncated so we still get an architecture-level review instead of
@@ -301,12 +305,11 @@ def hydrate_pr(repo: str, pr: PullRequest) -> None:
 # Copilot review (the ONLY task we delegate to the model)
 # ---------------------------------------------------------------------------
 
-REVIEW_INSTRUCTIONS = """\
-You are an automated code reviewer for a TypeScript / React / Node codebase
-(microsoft.ghe.com/bic/agentic-automations -- the Copilot Studio agentic
-automations product). You will be given a single pull request: its title,
-description, file list, and unified diff. You will NOT browse the repo,
-run tools, or fetch anything else. Review ONLY what is provided.
+REVIEW_INSTRUCTIONS_TEMPLATE = """\
+You are an automated code reviewer for __CODEBASE_DESCRIPTION__. You will
+be given a single pull request: its title, description, file list, and
+unified diff. You will NOT browse the repo, run tools, or fetch anything
+else. Review ONLY what is provided.
 
 You MUST write your response as a JSON object to a file named
 `review_output.json` in the current working directory. Do not print the
@@ -423,7 +426,7 @@ comments under an approve instead):
 If you're on the fence — approve. The author can read your optional
 comments and decide. Blocking should require a concrete, articulable,
 material problem.
-
+__CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK__
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
     extracting this" without saying what and why.
@@ -443,6 +446,55 @@ Strict rules for comments:
 Write the JSON object to `review_output.json` now. Default to approve
 unless you have a concrete, material problem to point at.
 """
+
+
+def _format_bullets(items: Any) -> str:
+    if not items:
+        return ""
+    if isinstance(items, str):
+        items = [items]
+    bullets = [f"  - {str(x).strip()}" for x in items if str(x).strip()]
+    return "\n".join(bullets)
+
+
+def _render_review_instructions() -> str:
+    """Render REVIEW_INSTRUCTIONS_TEMPLATE with per-install config injected.
+
+    Defaults reproduce the original (pre-templated) text exactly so
+    existing installs without a config.json see no behavioral change.
+    """
+    codebase = _user_config.get(
+        "codebase_description",
+        "a TypeScript / React / Node codebase "
+        "(microsoft.ghe.com/bic/agentic-automations -- the Copilot Studio "
+        "agentic automations product)",
+    )
+    focus_bullets = _format_bullets(_user_config.get("review_focus"))
+    avoid_bullets = _format_bullets(_user_config.get("review_avoid"))
+    style = (_user_config.get("reviewer_style") or "").strip()
+
+    custom_focus_block = (
+        f"\n\nAdditional focus areas this reviewer cares about (treat as priorities, not exhaustive):\n{focus_bullets}\n"
+        if focus_bullets else ""
+    )
+    custom_avoid_block = (
+        f"\nAdditional things to NEVER comment on for this codebase:\n{avoid_bullets}\n"
+        if avoid_bullets else ""
+    )
+    reviewer_style_block = (
+        f"\nReviewer style preferences: {style}\n" if style else ""
+    )
+
+    return (
+        REVIEW_INSTRUCTIONS_TEMPLATE
+        .replace("__CODEBASE_DESCRIPTION__", codebase)
+        .replace("__CUSTOM_FOCUS_BLOCK__", custom_focus_block)
+        .replace("__CUSTOM_AVOID_BLOCK__", custom_avoid_block)
+        .replace("__REVIEWER_STYLE_BLOCK__", reviewer_style_block)
+    )
+
+
+REVIEW_INSTRUCTIONS = _render_review_instructions()
 
 
 def build_review_prompt(pr: PullRequest) -> str:
