@@ -82,6 +82,17 @@ COPILOT_EFFORT = os.environ.get("COPILOT_REVIEW_EFFORT", "high")
 # Hard wall-clock cap for the Copilot review call (seconds).
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_REVIEW_TIMEOUT", "900"))
 
+# Disk hygiene for Copilot CLI side-effects.
+#   - Each `copilot -p` invocation creates a fresh ~/.copilot/session-state/<uuid>
+#     folder (events.jsonl, session.db, checkpoints, ...). The CLI never
+#     deletes these. We snapshot+diff to delete the per-review session
+#     immediately, then prune anything older than COPILOT_SESSION_KEEP_DAYS
+#     once per cycle as a safety net.
+#   - Stray %TEMP%/copilot_review_* dirs older than 1 day get swept too.
+COPILOT_SESSION_DIR = Path.home() / ".copilot" / "session-state"
+COPILOT_SESSION_KEEP_DAYS = int(os.environ.get("COPILOT_SESSION_KEEP_DAYS", "7"))
+COPILOT_TEMP_KEEP_HOURS = int(os.environ.get("COPILOT_TEMP_KEEP_HOURS", "24"))
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1233,6 +1244,72 @@ def format_reconsider_body_LEGACY_REMOVED(pr, review, prior_decision):
     raise NotImplementedError("use format_reconsider_body() at line ~654")
 
 
+def _snapshot_copilot_session_ids() -> set[str]:
+    """Return current set of session-state folder names. Used to detect
+    the per-review session Copilot CLI creates so we can delete it
+    immediately after the call (the CLI never cleans these up)."""
+    try:
+        if not COPILOT_SESSION_DIR.is_dir():
+            return set()
+        return {p.name for p in COPILOT_SESSION_DIR.iterdir() if p.is_dir()}
+    except OSError:
+        return set()
+
+
+def _cleanup_new_copilot_sessions(before: set[str]) -> None:
+    """Delete any session-state folders that appeared after `before` was
+    snapshotted. Best-effort: log warnings on failure, never raise."""
+    try:
+        if not COPILOT_SESSION_DIR.is_dir():
+            return
+        after = {p.name for p in COPILOT_SESSION_DIR.iterdir() if p.is_dir()}
+    except OSError:
+        return
+    new_ids = after - before
+    for sid in new_ids:
+        try:
+            shutil.rmtree(COPILOT_SESSION_DIR / sid, ignore_errors=True)
+            logging.debug("Cleaned up copilot session %s", sid)
+        except OSError as e:
+            logging.warning("Could not delete copilot session %s: %s", sid, e)
+
+
+def prune_copilot_artifacts() -> None:
+    """Once-per-cycle safety net: delete old session-state folders and
+    orphaned %TEMP%/copilot_review_* dirs. All errors are swallowed."""
+    cutoff_sessions = time.time() - COPILOT_SESSION_KEEP_DAYS * 86400
+    cutoff_tmp = time.time() - COPILOT_TEMP_KEEP_HOURS * 3600
+    pruned_sessions = pruned_tmp = 0
+    try:
+        if COPILOT_SESSION_DIR.is_dir():
+            for child in COPILOT_SESSION_DIR.iterdir():
+                try:
+                    if child.is_dir() and child.stat().st_mtime < cutoff_sessions:
+                        shutil.rmtree(child, ignore_errors=True)
+                        pruned_sessions += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    try:
+        tmp_root = Path(tempfile.gettempdir())
+        for child in tmp_root.glob("copilot_review_*"):
+            try:
+                if child.is_dir() and child.stat().st_mtime < cutoff_tmp:
+                    shutil.rmtree(child, ignore_errors=True)
+                    pruned_tmp += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    if pruned_sessions or pruned_tmp:
+        logging.info(
+            "Pruned copilot artifacts: %d session(s) (>%dd), %d temp dir(s) (>%dh)",
+            pruned_sessions, COPILOT_SESSION_KEEP_DAYS,
+            pruned_tmp, COPILOT_TEMP_KEEP_HOURS,
+        )
+
+
 def run_copilot_review_call(prompt: str,
                             validator=_validate_review) -> dict[str, Any]:
     """Invoke copilot; expect JSON in `review_output.json` in cwd."""
@@ -1251,6 +1328,7 @@ def run_copilot_review_call(prompt: str,
         "Do not print the JSON to stdout."
     )
 
+    sessions_before = _snapshot_copilot_session_ids()
     try:
         cmd = [
             "copilot",
@@ -1295,6 +1373,7 @@ def run_copilot_review_call(prompt: str,
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except OSError:
             pass
+        _cleanup_new_copilot_sessions(sessions_before)
 
 
 def save_review_artifact(pr: PullRequest, review: dict[str, Any]) -> Path:
@@ -1613,6 +1692,7 @@ def main() -> int:
     args = ap.parse_args()
 
     setup_logging(args.verbose)
+    prune_copilot_artifacts()
     try:
         me = get_viewer_login()
     except Exception as e:
