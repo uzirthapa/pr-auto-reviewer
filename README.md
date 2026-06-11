@@ -131,43 +131,101 @@ appended by `auto_review.py` every cycle.
 
 Anything codebase-specific (host, repo, reviewer prompt focus,
 things-to-ignore, recipient email) lives in `config.json` next to the
-scripts. The code itself is generic.
+scripts. The code itself is generic. Each teammate ends up with their
+own clone + their own `config.json` + their own `state.json` — nothing
+is shared at runtime.
 
-To onboard a teammate:
+### Granting your team access (without adding people one by one)
 
-1. They clone the repo:
-   ```pwsh
-   git clone <this repo url>
-   cd CodeReviewAgentDesigner
-   ```
-2. They run the interactive wizard:
-   ```pwsh
-   python setup.py
-   ```
-   It checks prereqs (`gh`, `copilot`, `python`, `gh auth`), then asks
-   them about:
-   - GitHub host + repo to review
-   - Daily-summary recipient email
-   - One-sentence codebase description (injected into the reviewer prompt)
-   - Focus areas the reviewer should ALWAYS look for
-   - Things the reviewer should NEVER comment on
-   - Reviewer voice / style preferences
+On Microsoft GHE you have three good options:
 
-   **Shorthand is fine.** If they type bullets like `efficiency`,
-   `syntax`, or `concurrency`, the wizard will offer to expand them via
-   Copilot using their codebase context into detailed reviewer guidance
-   (e.g. "Flag O(n^2) loops over arrays that can be large, missed
-   memoization in hot React renders, N+1 fetches where a batched call
-   would do..."). They preview the elaboration and accept/reject before
-   it's written to `config.json`.
+| # | How                                                       | One-time setup                                                                                  | What teammates do          |
+| - | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------- |
+| 1 | **Add a GHE team as a read collaborator** *(recommended)* | `gh api -X PUT orgs/<org>/teams/<team-slug>/repos/<owner>/<repo> -f permission=pull`            | Run the installer (below)  |
+| 2 | **Transfer the repo to an org, set Internal visibility**  | `gh api -X POST repos/<owner>/<repo>/transfer -f new_owner=<org>` then `gh repo edit ... --visibility internal` | Run the installer (below) — every org member can clone immediately |
+| 3 | Ship a tarball/zip via Teams / OneDrive                   | None                                                                                            | Lose `git pull` updates; not recommended |
 
-   To re-elaborate later after hand-editing `config.json`:
-   ```pwsh
-   python setup.py --elaborate
-   ```
+To find your team slug:
+```pwsh
+$env:GH_HOST="microsoft.ghe.com"
+gh api orgs/<org>/teams --paginate --jq '.[] | "\(.slug)  -- \(.name)"' | findstr /i "<keyword>"
+```
 
-   It writes `config.json` and optionally registers the two Windows
-   scheduled tasks for them.
+Personal-namespace repos cannot be set to `INTERNAL` on GHE — they must
+be transferred to an org first. That's the only catch.
+
+### One-line installer for teammates
+
+Once they have read access, the entire onboarding is a single line. Send
+them this (substitute your repo's raw URL):
+
+```pwsh
+iwr https://microsoft.ghe.com/raw/<owner>/<repo>/main/install.ps1 -UseDefaultCredentials | iex
+```
+
+Or, if they prefer to inspect it first:
+
+```pwsh
+git clone https://microsoft.ghe.com/<owner>/<repo>.git
+cd <repo>
+.\install.ps1
+```
+
+`install.ps1` checks for `git`, `gh`, `copilot`, `python` (warns with
+exact `winget` commands for anything missing), clones the repo, then
+hands off to `python setup.py` for the interactive wizard. Flags:
+
+- `-Dir C:\path`     — where to clone (default: `.\agentic-automations-auto-review`)
+- `-RepoUrl <url>`   — clone from a fork instead
+- `-NoSetup`         — clone only; they can run the wizard later
+
+### After they're set up
+
+They follow the standard flow in the previous section:
+
+1. `python setup.py` — interactive wizard (already run by the installer)
+2. `python auto_review.py --dry-run --verbose` — validate
+3. `.\register_scheduled_task.ps1 -Live` — go live
+4. `.\register_daily_report_task.ps1` — daily email
+
+Updates from you propagate via `git pull`:
+
+```pwsh
+cd <where they cloned>
+git pull
+# config.json is gitignored, so their settings survive.
+```
+
+### Walk-through skill
+
+A Copilot CLI skill ships with the repo at
+`.copilot/skills/setup-auto-reviewer/SKILL.md`. After cloning, copy or
+symlink it into their user skills folder (`%USERPROFILE%\.copilot\skills\`)
+and they can just ask Copilot CLI:
+> "Help me set up the auto-reviewer"
+
+The skill conducts the interview conversationally (one question per turn,
+reflecting answers back) and synthesizes `config.json` directly, then
+walks through dry-run validation and scheduling.
+
+### Onboarding a teammate — copy/pasteable
+
+```
+Hey — I built a tool that auto-reviews your incoming PRs every 5 minutes
+and emails you a daily summary at 7am. It uses Copilot under the hood
+for the actual review, and is fully tailorable to your codebase (you
+get to define focus areas, things to ignore, and reviewer tone during
+setup — Copilot expands shorthand for you).
+
+Install in one line (needs git, gh, copilot, python; PowerShell will
+warn you if any are missing):
+
+    iwr https://microsoft.ghe.com/raw/<owner>/<repo>/main/install.ps1 -UseDefaultCredentials | iex
+
+It'll walk you through the wizard. Start with --dry-run for a day or
+two to make sure the reviews look right for your repo, then flip to
+live mode. Ping me if anything looks off.
+```
 3. They dry-run:
    ```pwsh
    python auto_review.py --dry-run --verbose

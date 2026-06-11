@@ -59,6 +59,7 @@ explicitly dismiss our prior `CHANGES_REQUESTED` via the
 | `setup.py`                                    | Interactive wizard for new users. Writes `config.json`. Offers to register tasks. Calls `copilot` to elaborate shorthand focus/avoid/style items into detailed reviewer guidance (`--elaborate` re-runs just that). |
 | `register_scheduled_task.ps1`                 | Registers the every-5-min `AgenticAutomations-AutoReview` task.      |
 | `register_daily_report_task.ps1`              | Registers the Mon-Fri 07:00 `AgenticAutomations-DailyReport` task.   |
+| `install.ps1`                                 | One-line bootstrap installer for teammates: prereq-checks, clones, runs `setup.py`. Invoked via `iwr ... | iex`. |
 | `.copilot/skills/setup-auto-reviewer/SKILL.md`| Copilot CLI skill walking new users through `setup.py`.              |
 | `config.example.json`                         | Documented template colleagues copy / edit.                          |
 | `config.json` *(gitignored)*                  | Per-install overrides. Missing is fine — defaults reproduce my live setup. |
