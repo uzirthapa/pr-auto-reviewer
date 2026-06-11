@@ -56,7 +56,7 @@ explicitly dismiss our prior `CHANGES_REQUESTED` via the
 | `send_daily_report.py`                        | Calls `daily_report.render_html`, sends via Outlook COM (PowerShell). |
 | `rerun_comment_verdicts.py`                   | One-off backfill: re-run reconsider on PRs whose stored verdict was the legacy `comment`. |
 | `config.py`                                   | Tiny loader for `config.json`. No fallbacks logic here — defaults live in the consumers. |
-| `setup.py`                                    | Interactive wizard for new users. Writes `config.json`. Offers to register tasks. |
+| `setup.py`                                    | Interactive wizard for new users. Writes `config.json`. Offers to register tasks. Calls `copilot` to elaborate shorthand focus/avoid/style items into detailed reviewer guidance (`--elaborate` re-runs just that). |
 | `register_scheduled_task.ps1`                 | Registers the every-5-min `AgenticAutomations-AutoReview` task.      |
 | `register_daily_report_task.ps1`              | Registers the Mon-Fri 07:00 `AgenticAutomations-DailyReport` task.   |
 | `.copilot/skills/setup-auto-reviewer/SKILL.md`| Copilot CLI skill walking new users through `setup.py`.              |

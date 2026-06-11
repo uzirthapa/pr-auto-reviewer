@@ -26,12 +26,21 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "config.json"
 EXAMPLE_PATH = SCRIPT_DIR / "config.example.json"
+
+# Reuse the same Copilot model / effort the reviewer uses, so elaboration
+# matches its voice. Elaboration is much shorter than a review so we give
+# it a tighter timeout.
+COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.7-1m-internal")
+COPILOT_EFFORT = os.environ.get("COPILOT_SETUP_EFFORT", "medium")
+COPILOT_TIMEOUT = int(os.environ.get("COPILOT_SETUP_TIMEOUT", "180"))
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +203,208 @@ def write_config(cfg: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Copilot-powered prompt elaboration
+#
+# Same pattern as auto_review.py: write the long prompt to a file in a
+# scratch dir, hand `copilot` a short instruction pointing at it, and
+# have the model write its JSON output to a sibling file. No GitHub I/O,
+# no tools beyond filesystem in the scratch dir.
+# ---------------------------------------------------------------------------
+
+_ELABORATION_INSTRUCTIONS = """\
+You are helping a user customize the prompt for an automated PR
+code-reviewer. The user has typed __KIND_DESCRIPTION__ in shorthand
+(sometimes just a single word like "efficiency" or "syntax", sometimes a
+short phrase). For each shorthand item, expand it into ONE concrete,
+actionable bullet of 1-3 sentences that an experienced senior engineer
+would actually want a reviewer to follow on every PR.
+
+Codebase context (use it to tailor the bullets to the actual stack /
+domain, NOT to copy verbatim):
+  __CODEBASE_DESCRIPTION__
+
+For each bullet:
+  - Name WHAT to look for (specific patterns, anti-patterns, smells).
+  - Say WHY it matters in this codebase if the stack makes a difference.
+  - __KIND_RULES__
+  - Stay under ~50 words per bullet. Be precise, not preachy.
+  - Do NOT add bullets the user did not ask for.
+  - Do NOT restate the built-in defaults (correctness, security, perf,
+    architecture, dependency hygiene are already covered by the base
+    prompt). Your job is to elaborate the user's items, in their order.
+
+User's shorthand items (one per line):
+__RAW_ITEMS__
+
+Write your answer as a JSON object to `elaborated.json` in the current
+working directory. Do not print to stdout. Schema:
+
+{
+  "items": [
+    "<elaborated bullet for shorthand item 1>",
+    "<elaborated bullet for shorthand item 2>",
+    ...
+  ]
+}
+
+The `items` array MUST have exactly the same length as the user's input
+and be in the same order. After writing the file, your job is done.
+"""
+
+_KIND_META = {
+    "focus": {
+        "description": "things the reviewer should ALWAYS look for",
+        "rules": (
+            "Phrase as something to flag / catch / question, not as praise."
+        ),
+    },
+    "avoid": {
+        "description": "kinds of comments the reviewer should NEVER make",
+        "rules": (
+            "Phrase as 'Do NOT comment on X' or 'Skip Y'. Be explicit about "
+            "the boundary so the reviewer doesn't accidentally still flag it."
+        ),
+    },
+    "style": {
+        "description": "the reviewer's tone / voice / style preferences",
+        "rules": (
+            "Treat the user's input as ONE item even if multi-line. Output "
+            "ONE bullet, not several. Translate the vibe into concrete "
+            "drafting rules ('use second person', 'lead with the fix', "
+            "'avoid hedging words like maybe/consider', etc.)."
+        ),
+    },
+}
+
+
+def elaborate_items(raw_items: list[str], kind: str, codebase: str) -> list[str] | None:
+    """Ask Copilot to expand shorthand into reviewer guidance bullets.
+
+    Returns the elaborated list on success, or None on any failure (caller
+    should fall back to the raw input — elaboration must NEVER block setup).
+    """
+    if not raw_items:
+        return []
+    if not shutil.which("copilot"):
+        print("  (skipping elaboration: `copilot` CLI not on PATH)")
+        return None
+    meta = _KIND_META.get(kind, _KIND_META["focus"])
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="autorev_setup_"))
+    input_file = tmp_dir / "elaborate_input.md"
+    output_file = tmp_dir / "elaborated.json"
+
+    raw_block = "\n".join(f"  {i+1}. {item}" for i, item in enumerate(raw_items))
+    prompt = (
+        _ELABORATION_INSTRUCTIONS
+        .replace("__KIND_DESCRIPTION__", meta["description"])
+        .replace("__KIND_RULES__", meta["rules"])
+        .replace("__CODEBASE_DESCRIPTION__", codebase or "(not specified)")
+        .replace("__RAW_ITEMS__", raw_block)
+    )
+    input_file.write_text(prompt, encoding="utf-8")
+
+    short = (
+        "Read elaborate_input.md in this directory and follow it exactly. "
+        "Write the resulting JSON object to elaborated.json in this same "
+        "directory. Do not print the JSON to stdout."
+    )
+    cmd = [
+        "copilot",
+        "--model", COPILOT_MODEL,
+        "--effort", COPILOT_EFFORT,
+        "--allow-all-tools",
+        "--add-dir", str(tmp_dir),
+        "--no-color",
+        "-p", short,
+    ]
+    print(f"  Elaborating {len(raw_items)} {kind} item(s) via copilot "
+          f"({COPILOT_MODEL}, effort={COPILOT_EFFORT}, ~30-90s)…")
+    t0 = time.time()
+    try:
+        res = subprocess.run(
+            cmd, cwd=str(tmp_dir), capture_output=True, text=True,
+            timeout=COPILOT_TIMEOUT, encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  (elaboration timed out after {COPILOT_TIMEOUT}s; keeping raw items)")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+    dur = time.time() - t0
+
+    try:
+        if res.returncode != 0:
+            print(f"  (copilot exited {res.returncode}; keeping raw items)")
+            return None
+        if not output_file.exists():
+            print("  (copilot did not write elaborated.json; keeping raw items)")
+            return None
+        obj = json.loads(output_file.read_text(encoding="utf-8"))
+        items = obj.get("items")
+        if (not isinstance(items, list)
+                or len(items) != len(raw_items)
+                or not all(isinstance(x, str) and x.strip() for x in items)):
+            print("  (elaborated.json shape unexpected; keeping raw items)")
+            return None
+        print(f"  Elaboration done in {dur:.1f}s.")
+        return [s.strip() for s in items]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _preview_elaboration(label: str, raw: list[str], elaborated: list[str]) -> None:
+    print(f"\n  --- {label} (before -> after) ---")
+    for r, e in zip(raw, elaborated):
+        print(f"    [in ] {r}")
+        # Wrap elaborated text to ~78 cols for readability.
+        body = e.replace("\n", " ").strip()
+        words = body.split()
+        line = "    [out] "
+        out_lines = []
+        for w in words:
+            if len(line) + len(w) + 1 > 78:
+                out_lines.append(line)
+                line = "          " + w
+            else:
+                line = (line + " " + w) if line.endswith(" ") is False and line.strip() else line + w
+        out_lines.append(line)
+        for ln in out_lines:
+            print(ln)
+        print()
+
+
+def _maybe_elaborate(items: list[str], kind: str, codebase: str, *,
+                     non_interactive: bool) -> list[str]:
+    """Offer elaboration; on accept, replace items. On reject/failure, return raw."""
+    if not items:
+        return items
+    # In non-interactive mode, only elaborate if asked via env var, to keep
+    # headless reruns deterministic and fast.
+    if non_interactive:
+        if os.environ.get("AUTOREVIEW_ELABORATE_ON_SETUP", "").lower() not in ("1", "true", "yes"):
+            return items
+    else:
+        if not _ask_yes_no(
+            f"  Expand these {kind} items into detailed reviewer guidance using Copilot?",
+            default=True, non_interactive=non_interactive,
+        ):
+            return items
+
+    elaborated = elaborate_items(items, kind, codebase)
+    if elaborated is None:
+        return items
+
+    if non_interactive:
+        return elaborated
+
+    _preview_elaboration(f"{kind} items", items, elaborated)
+    if _ask_yes_no("  Accept the elaborated version?", default=True):
+        return elaborated
+    print("  (keeping your original raw items)")
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Interactive wizard
 # ---------------------------------------------------------------------------
 
@@ -258,15 +469,31 @@ List specific concerns this reviewer should ALWAYS look out for. These are
 *on top of* the built-in defaults (correctness, security, performance,
 architecture, dependency hygiene). One item per line, blank line to finish.
 
-  Examples:
-    - "API contract drift between frontend models and backend DTOs"
-    - "Telemetry — every new error path must emit a warning event"
-    - "Feature flag misuse — no business logic gated on UI-only flags"
-    - "Direct DB writes outside the repository layer"
+  SHORTHAND IS FINE — after you finish, Copilot can expand single words
+  ("efficiency", "syntax", "concurrency") into detailed reviewer guidance
+  using your codebase context. You'll get to preview and accept/reject.
+
+  Examples (shorthand → what Copilot might produce):
+    "efficiency"   →  "Flag O(n^2) loops over arrays that can be large,
+                       missed memoization in hot React renders, N+1 fetches
+                       where a batched call would do, and unnecessary
+                       re-renders from new object/array literals in props."
+    "syntax"       →  "Catch dead code, unreachable branches, swallowed
+                       errors (empty catch / unhandled promise rejections),
+                       and misuse of async/await (missing await, fire-and-
+                       forget where the result is needed)."
+    "concurrency"  →  "Flag shared mutable state without locking, awaits
+                       inside loops that should be Promise.all, and any
+                       new background timer that doesn't get cleared on
+                       unmount/dispose."
 """.rstrip())
     cfg["review_focus"] = _ask_list(
         "Focus areas:",
         defaults=existing.get("review_focus", []),
+        non_interactive=non_interactive,
+    )
+    cfg["review_focus"] = _maybe_elaborate(
+        cfg["review_focus"], "focus", codebase,
         non_interactive=non_interactive,
     )
 
@@ -284,6 +511,10 @@ choices, things you have a linter for). One per line, blank line to finish.
     cfg["review_avoid"] = _ask_list(
         "Things to avoid:",
         defaults=existing.get("review_avoid", []),
+        non_interactive=non_interactive,
+    )
+    cfg["review_avoid"] = _maybe_elaborate(
+        cfg["review_avoid"], "avoid", codebase,
         non_interactive=non_interactive,
     )
 
@@ -304,7 +535,9 @@ and depth you want. Skip if you're happy with the defaults.
         non_interactive=non_interactive,
     )
     if style:
-        cfg["reviewer_style"] = style
+        elaborated = _maybe_elaborate([style], "style", codebase,
+                                      non_interactive=non_interactive)
+        cfg["reviewer_style"] = elaborated[0] if elaborated else style
     elif "reviewer_style" in cfg:
         cfg.pop("reviewer_style")
 
@@ -364,6 +597,10 @@ def main() -> int:
                          "on any required-without-default.")
     ap.add_argument("--skip-prereqs", action="store_true",
                     help="Don't run the prereq check section.")
+    ap.add_argument("--elaborate", action="store_true",
+                    help="Skip the interview; just re-run Copilot elaboration "
+                         "on the focus/avoid/style items already in config.json. "
+                         "Useful after editing config.json by hand.")
     args = ap.parse_args()
 
     print("Auto-Reviewer setup")
@@ -373,6 +610,31 @@ def main() -> int:
     existing = load_existing()
     if existing:
         print(f"  (existing config detected — its values will be the prompt defaults)")
+
+    if args.elaborate:
+        if not existing:
+            print("\nERROR: --elaborate requires an existing config.json to elaborate.",
+                  file=sys.stderr)
+            return 2
+        codebase = existing.get("codebase_description", "")
+        cfg = dict(existing)
+        cfg["review_focus"] = _maybe_elaborate(
+            existing.get("review_focus", []), "focus", codebase,
+            non_interactive=False,
+        )
+        cfg["review_avoid"] = _maybe_elaborate(
+            existing.get("review_avoid", []), "avoid", codebase,
+            non_interactive=False,
+        )
+        style = existing.get("reviewer_style", "").strip()
+        if style:
+            elaborated = _maybe_elaborate([style], "style", codebase,
+                                          non_interactive=False)
+            if elaborated:
+                cfg["reviewer_style"] = elaborated[0]
+        write_config(cfg)
+        print(f"\n✓ Wrote {CONFIG_PATH}")
+        return 0
 
     host_for_check = existing.get("gh_host", "microsoft.ghe.com")
     if not args.skip_prereqs:

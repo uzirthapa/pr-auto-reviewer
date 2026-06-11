@@ -153,6 +153,19 @@ To onboard a teammate:
    - Things the reviewer should NEVER comment on
    - Reviewer voice / style preferences
 
+   **Shorthand is fine.** If they type bullets like `efficiency`,
+   `syntax`, or `concurrency`, the wizard will offer to expand them via
+   Copilot using their codebase context into detailed reviewer guidance
+   (e.g. "Flag O(n^2) loops over arrays that can be large, missed
+   memoization in hot React renders, N+1 fetches where a batched call
+   would do..."). They preview the elaboration and accept/reject before
+   it's written to `config.json`.
+
+   To re-elaborate later after hand-editing `config.json`:
+   ```pwsh
+   python setup.py --elaborate
+   ```
+
    It writes `config.json` and optionally registers the two Windows
    scheduled tasks for them.
 3. They dry-run:

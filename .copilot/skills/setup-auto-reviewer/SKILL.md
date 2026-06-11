@@ -70,10 +70,10 @@ Ask, in order:
 4. **Focus areas (3–6 items).**
    "What does this reviewer absolutely need to catch in your codebase, on
     top of the built-in defaults (correctness, security, perf, architecture,
-    dependency hygiene)? Think: 'the things you find yourself flagging on
-    every PR review.' Examples: API contract drift between FE and BE,
-    telemetry on every new error path, no business logic gated on UI-only
-    feature flags, no direct DB writes outside the repository layer."
+    dependency hygiene)? Shorthand is fine — you can say things like
+    'efficiency', 'syntax', 'concurrency', 'API contracts', 'telemetry'.
+    I'll expand them into concrete reviewer guidance using your codebase
+    context, and you can preview before we commit."
 
 5. **Things the reviewer should NEVER comment on.**
    "What kinds of comments would feel like noise on your team's PRs?
@@ -90,10 +90,15 @@ Ask, in order:
 Either:
 
 a) **Drive `setup.py` interactively** in a terminal (recommended if the
-   user is in their own shell), or
+   user is in their own shell — it handles Copilot-powered shorthand
+   elaboration end-to-end with preview/accept), or
 
 b) **Synthesize `config.json` yourself** from the interview answers and
-   write it to `config.json` next to `auto_review.py` — fields:
+   write it to `config.json` next to `auto_review.py`. If they gave you
+   shorthand (e.g. "efficiency", "syntax"), elaborate it yourself into
+   1-3 concrete sentences each — using the codebase description from
+   step 3 as context — before writing. Tell the user what you elaborated
+   each shorthand into. Fields:
 
 ```json
 {
@@ -107,7 +112,9 @@ b) **Synthesize `config.json` yourself** from the interview answers and
 }
 ```
 
-Confirm with the user what you're about to write, then write it.
+Confirm with the user what you're about to write, then write it. If they
+later want to re-elaborate (e.g. after editing config by hand), they can
+run `python setup.py --elaborate`.
 
 ## Step 4 — Dry-run validation
 
