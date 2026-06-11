@@ -178,6 +178,207 @@ To onboard a teammate:
    .\register_daily_report_task.ps1
    ```
 
+### Full setup walk-through (real transcript)
+
+What `python setup.py` actually looks like end-to-end. The lines
+prefixed `>` are what the user types; everything else is the wizard's
+output. This is a real run against a Python Django invoice-processing
+codebase.
+
+```text
+PS C:\Users\jdoe\CodeReviewAgentDesigner> python setup.py
+Auto-Reviewer setup
+  Config will be written to: C:\Users\jdoe\CodeReviewAgentDesigner\config.json
+  Example reference:         C:\Users\jdoe\CodeReviewAgentDesigner\config.example.json
+
+------------------
+  Prereq checks
+------------------
+  + Python         found at C:\Python312\python.exe
+  + GitHub CLI     found at C:\Program Files\GitHub CLI\gh.exe
+  + Copilot CLI    found at C:\Users\jdoe\AppData\Local\GitHubCopilotCli\copilot.exe
+  + gh auth status (microsoft.ghe.com): Logged in to microsoft.ghe.com as jdoe
+
+----------------------------
+  1) GitHub connection
+----------------------------
+GitHub host (e.g. github.com, or your enterprise GHE host) [microsoft.ghe.com]: >
+Repository to review (owner/name): > finance/invoice-service
+  Detected reviewer login on microsoft.ghe.com: jdoe
+  (PRs are picked up via `review-requested:@me` — no need to configure.)
+
+------------------------------
+  2) Daily summary email
+------------------------------
+Email to receive the daily 07:00 summary (blank to skip) [jdoe@microsoft.com]: >
+
+--------------------------------------------
+  3) Tell the reviewer about your codebase
+--------------------------------------------
+This one sentence is injected into the reviewer prompt so the model has
+real context about the product / stack it's reviewing. Be concrete —
+think 'pitch the codebase to a senior engineer in one line'.
+
+  Examples:
+    - "a TypeScript / React / Node monorepo for the Copilot Studio agent designer"
+    - "a Python Django app handling B2B invoice ingestion and OCR"
+    - "a Go microservice that brokers messages between Kafka and PostgreSQL"
+
+Codebase description (one sentence): > a Python Django monorepo handling B2B invoice ingestion, OCR, and AP automation
+
+-------------------------------------------
+  4) What should the reviewer focus on?
+-------------------------------------------
+List specific concerns this reviewer should ALWAYS look out for. These are
+*on top of* the built-in defaults (correctness, security, performance,
+architecture, dependency hygiene). One item per line, blank line to finish.
+
+  SHORTHAND IS FINE — after you finish, Copilot can expand single words
+  ("efficiency", "syntax", "concurrency") into detailed reviewer guidance
+  using your codebase context. You'll get to preview and accept/reject.
+
+Focus areas:
+  > efficiency
+  > N+1 ORM queries
+  > tenant isolation
+  > telemetry on error paths
+  >
+  Expand these focus items into detailed reviewer guidance using Copilot? [Y/n]: >
+  Elaborating 4 focus item(s) via copilot (claude-opus-4.7-1m-internal, effort=medium, ~30-90s)…
+  Elaboration done in 28.4s.
+
+  --- focus items (before -> after) ---
+    [in ] efficiency
+    [out] Flag inefficient Django patterns on invoice workflows: unbounded
+          QuerySets without `.iterator()` on large invoice exports, missing
+          `select_related`/`prefetch_related` on related models, repeated
+          DRF serializer instantiation in loops, and OCR/PDF parsing done
+          synchronously inside request handlers instead of via Celery.
+
+    [in ] N+1 ORM queries
+    [out] Catch N+1s on invoice/line-item/vendor traversals — flag any new
+          loop over a QuerySet that accesses `.foreignkey.field` or a
+          reverse manager without an upstream `select_related` /
+          `prefetch_related`. Suggest the exact prefetch where possible.
+
+    [in ] tenant isolation
+    [out] Every query that touches invoice, vendor, or document tables MUST
+          filter by `tenant_id` (or go through a tenant-scoped manager).
+          Flag any raw SQL, `.objects.all()`, or admin endpoint that
+          forgets the filter — this is a data-leak class issue.
+
+    [in ] telemetry on error paths
+    [out] Every new `except` block (or DRF `handle_exception` override)
+          must emit a structured `logger.warning`/`logger.error` with the
+          tenant id and the operation name. Flag silent swallows and bare
+          `except: pass`.
+
+  Accept the elaborated version? [Y/n]: >
+
+------------------------------------------------------
+  5) What should the reviewer NEVER comment on?
+------------------------------------------------------
+Things to avoid:
+  > migration file ordering
+  > generated GraphQL types in api/schema_generated/
+  >
+  Expand these avoid items into detailed reviewer guidance using Copilot? [Y/n]: > n
+
+----------------------------------
+  6) Reviewer style / voice
+----------------------------------
+Reviewer style (blank to skip): > be terse like a senior eng, never say "consider X" without saying what and why
+
+  Expand these style items into detailed reviewer guidance using Copilot? [Y/n]: >
+  Elaborating 1 style item(s) via copilot...
+  Elaboration done in 12.1s.
+
+  --- style items (before -> after) ---
+    [in ] be terse like a senior eng, never say "consider X" without saying what and why
+    [out] Write like a senior engineer: lead with the concrete fix, not the
+          observation. Use imperative voice ("Move this into the repository
+          layer", not "you might consider moving this"). Drop hedging words
+          (maybe, perhaps, consider). Every comment should be actionable in
+          one sentence; if it isn't, delete it.
+
+  Accept the elaborated version? [Y/n]: >
+
++ Wrote C:\Users\jdoe\CodeReviewAgentDesigner\config.json
+
+------------------
+  Try it out
+------------------
+  1. Dry-run (no posts to GitHub, writes artifacts under reviews/):
+       python auto_review.py --dry-run --verbose
+
+  2. Single-PR dry-run:
+       python auto_review.py --dry-run --only-pr <pr-number> --verbose
+
+  3. Preview the daily report locally:
+       python send_daily_report.py --dry-run --verbose
+
+  4. Once you trust it, go live:
+       python auto_review.py
+
+----------------------------------
+  7) Windows Scheduled Tasks
+----------------------------------
+Register the 5-min auto-review task NOW? [y/N]: > y
+  Live mode (will POST reviews)?  No = dry-run. [y/N]: >
+  Running: powershell.exe -File ...\register_scheduled_task.ps1
+Registered task 'AgenticAutomations-AutoReview' (every 5 min, DRY-RUN).
+
+Register the daily 07:00 report task NOW? [y/N]: > y
+Registered task 'AgenticAutomations-DailyReport' (Mon-Fri at 07:00).
+```
+
+The resulting `config.json` looks like:
+
+```json
+{
+  "gh_host": "microsoft.ghe.com",
+  "repo": "finance/invoice-service",
+  "report_recipient": "jdoe@microsoft.com",
+  "codebase_description": "a Python Django monorepo handling B2B invoice ingestion, OCR, and AP automation",
+  "review_focus": [
+    "Flag inefficient Django patterns on invoice workflows: unbounded QuerySets without `.iterator()` on large invoice exports, missing `select_related`/`prefetch_related` on related models, repeated DRF serializer instantiation in loops, and OCR/PDF parsing done synchronously inside request handlers instead of via Celery.",
+    "Catch N+1s on invoice/line-item/vendor traversals — flag any new loop over a QuerySet that accesses `.foreignkey.field` or a reverse manager without an upstream `select_related` / `prefetch_related`. Suggest the exact prefetch where possible.",
+    "Every query that touches invoice, vendor, or document tables MUST filter by `tenant_id` (or go through a tenant-scoped manager). Flag any raw SQL, `.objects.all()`, or admin endpoint that forgets the filter — this is a data-leak class issue.",
+    "Every new `except` block (or DRF `handle_exception` override) must emit a structured `logger.warning`/`logger.error` with the tenant id and the operation name. Flag silent swallows and bare `except: pass`."
+  ],
+  "review_avoid": [
+    "migration file ordering",
+    "generated GraphQL types in api/schema_generated/"
+  ],
+  "reviewer_style": "Write like a senior engineer: lead with the concrete fix, not the observation. Use imperative voice ('Move this into the repository layer', not 'you might consider moving this'). Drop hedging words (maybe, perhaps, consider). Every comment should be actionable in one sentence; if it isn't, delete it."
+}
+```
+
+After this, the user runs:
+
+```pwsh
+python auto_review.py --dry-run --verbose
+```
+
+…inspects an artifact under `reviews/pr-<num>-<sha>.json`, and once it
+looks right, flips the scheduled task to live mode:
+
+```pwsh
+.\register_scheduled_task.ps1 -Live    # re-registers with --dry-run removed
+```
+
+That's it — they'll start getting auto-reviews on their PRs within 5
+minutes and a summary email at 07:00 the next weekday.
+
+#### Quick-reference: setup flags
+
+| Flag                 | When to use                                                     |
+| -------------------- | --------------------------------------------------------------- |
+| `python setup.py`    | First time, or to update any setting interactively.             |
+| `--elaborate`        | Re-run only the Copilot expansion on existing `config.json`.    |
+| `--non-interactive`  | CI / scripted re-runs — uses existing values, fails on missing required fields. |
+| `--skip-prereqs`     | Skip the `gh`/`copilot`/`python` checks (use when you know they're fine). |
+
 ### Walk-through skill
 
 A Copilot CLI skill ships with the repo at
