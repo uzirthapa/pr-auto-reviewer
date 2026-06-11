@@ -20,6 +20,9 @@ from pathlib import Path
 from daily_report import render_html, load_records
 import config as _user_config
 
+# Suppress Windows console flash when launched under pythonw.exe.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_PATH = SCRIPT_DIR / "daily_report.log"
 
@@ -87,6 +90,7 @@ def send_via_outlook(html: str, recipient: str, subject: str) -> None:
     res = subprocess.run(
         cmd, capture_output=True, timeout=SEND_TIMEOUT,
         encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
     dur = time.time() - start
     out = (res.stdout or "").strip()

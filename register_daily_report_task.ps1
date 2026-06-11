@@ -31,6 +31,9 @@ if ($Unregister) {
 
 if (-not (Test-Path $pyScript)) { throw "send_daily_report.py not found at $pyScript" }
 $python = (Get-Command python -ErrorAction Stop).Source
+# Use pythonw.exe so the daily task doesn't briefly flash a console window.
+$pythonw = $python -replace 'python\.exe$', 'pythonw.exe'
+if (Test-Path $pythonw) { $python = $pythonw }
 
 $action = New-ScheduledTaskAction `
     -Execute $python `

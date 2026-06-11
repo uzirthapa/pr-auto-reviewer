@@ -47,6 +47,10 @@ from typing import Any
 
 import config as _user_config
 
+# On Windows, prevent every subprocess (gh, copilot) from briefly flashing
+# a console window when the scheduler runs us under pythonw.exe.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -144,6 +148,7 @@ def gh(args: list[str], *, check: bool = True, input_text: str | None = None,
         cmd, env=_gh_env(), capture_output=True, text=True,
         input=input_text, timeout=timeout,
         encoding="utf-8", errors="replace",
+        creationflags=_NO_WINDOW,
     )
     if check and res.returncode != 0:
         raise RuntimeError(
@@ -1265,6 +1270,7 @@ def run_copilot_review_call(prompt: str,
             cmd, cwd=str(tmp_dir), capture_output=True, text=True,
             timeout=COPILOT_TIMEOUT,
             encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW,
         )
         dur = time.time() - t0
         logging.info(

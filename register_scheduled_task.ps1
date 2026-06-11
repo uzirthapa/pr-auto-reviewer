@@ -32,6 +32,10 @@ if ($Unregister) {
 if (-not (Test-Path $pyScript)) { throw "auto_review.py not found at $pyScript" }
 
 $python = (Get-Command python -ErrorAction Stop).Source
+# Use pythonw.exe so the scheduled task runs without flashing a console
+# window every cycle. Falls back to python.exe if pythonw isn't present.
+$pythonw = $python -replace 'python\.exe$', 'pythonw.exe'
+if (Test-Path $pythonw) { $python = $pythonw }
 $pyArgs = "`"$pyScript`""
 if (-not $Live) { $pyArgs += " --dry-run" }
 
