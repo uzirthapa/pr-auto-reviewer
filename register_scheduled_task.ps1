@@ -1,4 +1,4 @@
-# Registers a Windows Scheduled Task to run auto_review.py every 20 minutes.
+# Registers a Windows Scheduled Task to run auto_review.py every 5 minutes.
 # Run this script ONCE from an elevated PowerShell (Run as Administrator).
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
@@ -12,7 +12,7 @@ param(
     [switch]$Live,
     [switch]$Unregister,
     [string]$TaskName = "AgenticAutomations-AutoReview",
-    [int]$IntervalMinutes = 20
+    [int]$IntervalMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"

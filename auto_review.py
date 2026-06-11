@@ -31,6 +31,7 @@ Designed to be invoked every ~20 minutes by Task Scheduler.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -162,6 +163,7 @@ class PullRequest:
     is_draft: bool
     body: str
     url: str
+    updated_at: str = ""
     files: list[dict[str, Any]] = field(default_factory=list)
     diff: str = ""
     diff_truncated: bool = False
@@ -171,7 +173,7 @@ def list_open_prs(repo: str) -> list[PullRequest]:
     """List open, non-draft PRs where the authenticated user is a
     requested reviewer."""
     prs: list[PullRequest] = []
-    fields = "number,title,author,headRefOid,baseRefName,headRefName,isDraft,body,url"
+    fields = "number,title,author,headRefOid,baseRefName,headRefName,isDraft,body,url,updatedAt"
     res = gh([
         "pr", "list",
         "--repo", repo,
@@ -197,9 +199,23 @@ def list_open_prs(repo: str) -> list[PullRequest]:
             is_draft=bool(p.get("isDraft")),
             body=p.get("body") or "",
             url=p.get("url", ""),
+            updated_at=p.get("updatedAt", ""),
         ))
     prs.sort(key=lambda x: x.number)
     return prs
+
+
+def compute_prs_fingerprint(prs: list[PullRequest]) -> str:
+    """Stable fingerprint of the PR list. Changes when any PR's HEAD
+    moves, when updatedAt advances (new comment / re-request), or when
+    the set of PRs changes."""
+    payload = [
+        (p.number, p.head_sha, getattr(p, "updated_at", "") or "")
+        for p in prs
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
 
 def _build_diff_from_files_api(repo: str, pr_number: int) -> tuple[str, bool]:
@@ -1561,6 +1577,23 @@ def main() -> int:
         if not prs:
             logging.warning("PR #%s not currently in 'review-requested:@me' set",
                             args.only_pr)
+
+    # Cheap-polling short-circuit: if nothing in the PR list has changed
+    # since the last run (same set of PRs, same HEADs, same updatedAt
+    # timestamps) we don't need to iterate. updatedAt advances on any
+    # comment, review, push, or re-request, so this is safe.
+    fingerprint = compute_prs_fingerprint(prs)
+    last_fingerprint = state.get("__last_prs_fingerprint")
+    if (not args.force and args.only_pr is None
+            and fingerprint == last_fingerprint and prs):
+        logging.info(
+            "PR list unchanged since last run (fingerprint=%s); skipping per-PR work",
+            fingerprint[:12],
+        )
+        print("\nNo changes since last run.")
+        return 0
+    state["__last_prs_fingerprint"] = fingerprint
+    save_state(state)
 
     results: list[tuple[int, str]] = []
     for pr in prs:
