@@ -442,6 +442,50 @@ comments under an approve instead):
 If you're on the fence — approve. The author can read your optional
 comments and decide. Blocking should require a concrete, articulable,
 material problem.
+
+File-size discipline (`scripts/file-line-limit-baseline.json`):
+  - If the diff modifies `scripts/file-line-limit-baseline.json`, you
+    MUST decide "request_changes". That file is a ratchet that only
+    grows when authors are letting source files balloon past their
+    historical line counts; raising it without splitting is something
+    we always push back on. This overrides the "consider splitting is
+    just a nit" carve-out below.
+  - For every file whose baseline is being RAISED (added entry, or
+    existing entry with a higher number than before), inspect that
+    file's contents in the rest of the diff and any surrounding
+    context visible to you, then leave a severity="required" inline
+    comment that names CONCRETELY:
+      * which cohesive chunks should move out — name them by their
+        actual symbols, e.g. "the `useFooBar` hook + its helpers",
+        "the `<X>Reducer` and its action creators", "the pure
+        validators at the bottom of the file", "the
+        Fluent-UI-specific styling block",
+      * a suggested new file name and one-line responsibility for
+        the extracted module,
+      * any obvious shared utility that should be lifted to a
+        common package.
+    Anchor the comment on a line inside the offending source file
+    when that file is in the diff; otherwise anchor on the changed
+    entry in `scripts/file-line-limit-baseline.json` itself. Do NOT
+    leave a vague "this file is too big" comment — that is not
+    actionable and will be treated as noise.
+  - If the baseline is being LOWERED (file actually got smaller),
+    that is a good thing and does not trigger this rule.
+
+Large-file opportunities (independent of the baseline file):
+  - If the diff itself introduces a new source file, or grows an
+    existing one, to the point where it is plausibly oversized
+    (~400+ lines of non-trivial source, a component file mixing
+    unrelated concerns, a util file accreting unrelated helpers,
+    a reducer + selectors + types + thunks all in one place, etc.),
+    leave an inline comment proposing a CONCRETE split in the same
+    format as above: name the cohesive chunks, suggest new file
+    names, point at the obvious seam.
+  - Use severity="optional" for this case by default — do not block
+    a PR just because a file is big — UNLESS the same PR is also
+    adding/raising that file's entry in
+    `scripts/file-line-limit-baseline.json`, in which case follow
+    the rule above and block with severity="required".
 __CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK__
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
@@ -1119,6 +1163,15 @@ Rules:
   - Do not invent new nitpicks unrelated to the new activity unless the
     new commits introduced them.
   - If the diff was truncated, say so and scope accordingly.
+  - File-size baseline rule (carries over from the initial review): if
+    the CURRENT diff still modifies `scripts/file-line-limit-baseline.json`
+    in a way that raises any entry, and the author has NOT split the
+    corresponding source file(s) in response, you MUST keep the
+    decision at "request_changes" with a severity="required" comment
+    that re-states a concrete split proposal (named symbols, suggested
+    new file names). Raising the baseline without splitting is always
+    blocking. If the author has now split the file and lowered (or
+    removed) the entry, treat that blocker as ADDRESSED.
 
 Write the JSON object to `review_output.json` now.
 """
