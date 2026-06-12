@@ -359,12 +359,30 @@ Be honest about the split. Don't mark everything required (that's noise).
 Don't mark everything optional either — if something is actually wrong,
 say so plainly.
 
-PREFER inline comments tied to a specific file + line. Every issue you raise
-should land on the most relevant added or context line in the new file
-(right side of the diff). Use the `+nnn` / context line numbers visible in
-the `@@ -a,b +c,d @@` hunk headers to pick the line. Only fall back to a
-file-level comment (omit `line`) if the issue genuinely doesn't have a
-single line to anchor to (e.g. "this whole file should not exist").
+ALWAYS use inline comments tied to a specific file + line. Every issue
+you raise MUST land on the most relevant added or context line in the
+new file (right side of the diff).
+
+The diff you receive is annotated: every commentable line is prefixed
+with `[L<n>]` where `<n>` is the exact RIGHT-side line number you must
+put in the `line` field. Deleted-only lines show `[L----]` and are
+NOT commentable — pick the nearest `[L<n>]` line instead. Each hunk
+header is also annotated with `<-- next RIGHT line = <n>` for sanity.
+
+DO NOT invent line numbers, do not count manually, do not guess from
+file structure outside the diff — only use numbers that appear in a
+`[L<n>]` prefix in the diff you were given. If the line you want to
+talk about does not have a `[L<n>]` prefix (because it isn't in any
+hunk), it is NOT commentable inline; pick the nearest `[L<n>]` line
+in the same hunk that is closest to the code you're discussing and
+describe the actual span in the body.
+
+Omitting `line` is only acceptable in the rare case where the concern
+genuinely has no single anchor — for example "this whole file should
+not exist", "this entire new module duplicates package X", or a
+cross-file architectural concern that doesn't live on one line. Do
+NOT file file-level comments out of laziness; they're harder to act
+on and harder to track.
 
 Review priorities (in order):
   1. Correctness: does the change actually solve the stated problem? Look
@@ -582,8 +600,8 @@ def build_review_prompt(pr: PullRequest) -> str:
         + "\n\n--- Changed files ---\n"
         + files_str
         + trunc_note
-        + "\n\n--- Unified diff ---\n"
-        + pr.diff
+        + "\n\n--- Unified diff (each line prefixed with [L<n>] where <n> is the RIGHT-side line number to use in your `line` field; delete lines show [L----]) ---\n"
+        + annotate_diff_with_line_numbers(pr.diff)
         + "\n=== END PULL REQUEST ===\n"
         + "\nReturn the JSON object now."
     )
@@ -684,6 +702,47 @@ def _validate_reconsider_NEW_REMOVED(obj: Any) -> dict[str, Any]:
     raise NotImplementedError("use _validate_reconsider() near line 1095")
 
 
+def annotate_diff_with_line_numbers(diff: str) -> str:
+    """Prefix every diff line with its RIGHT-side (new-file) line number.
+
+    GitHub only accepts inline review comments on lines that appear on
+    the RIGHT side of a hunk. The model can't reliably count from `@@`
+    headers on big files, so we render the diff with an explicit
+    `[L<n>]` (or `[L----]` for delete-only lines) gutter that the model
+    can copy directly into its `line` field. The underlying diff
+    content is preserved byte-for-byte after the gutter so downstream
+    review parsing keeps working.
+    """
+    out: list[str] = []
+    right: int | None = None
+    for raw in diff.splitlines():
+        if raw.startswith("diff --git ") or raw.startswith("index ") \
+                or raw.startswith("--- ") or raw.startswith("+++ "):
+            out.append(raw)
+            right = None
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            right = int(m.group(1))
+            out.append(raw + "    <-- next RIGHT line = " + str(right))
+            continue
+        if right is None:
+            out.append(raw)
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            out.append(f"[L{right:>5}] {raw}")
+            right += 1
+        elif raw.startswith(" "):
+            out.append(f"[L{right:>5}] {raw}")
+            right += 1
+        elif raw.startswith("-") and not raw.startswith("---"):
+            out.append(f"[L----] {raw}")
+        else:
+            # "\ No newline at end of file" etc.
+            out.append(raw)
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------------------
 # Posting the review back to GitHub
 # ---------------------------------------------------------------------------
@@ -745,19 +804,56 @@ def _decorate_body(c: dict[str, Any]) -> str:
     return prefix + body
 
 
+_SNAP_MAX_DISTANCE = 25  # lines
+
+
+def _snap_to_valid_line(target: int, valid_lines: set[int]) -> int | None:
+    """Snap `target` to the nearest commentable line in `valid_lines`.
+
+    GitHub only accepts inline review comments on lines that appear on
+    the RIGHT side of a hunk. The model frequently picks the "right"
+    semantic line (e.g. the function signature) when the actual diff
+    hunk is a few lines away. Rather than silently dropping the
+    comment to file-level, snap to the closest valid line within a
+    small window so the comment still lands inline near the change.
+    Returns None if nothing is within _SNAP_MAX_DISTANCE.
+    """
+    if not valid_lines:
+        return None
+    best = min(valid_lines, key=lambda v: (abs(v - target), v))
+    if abs(best - target) <= _SNAP_MAX_DISTANCE:
+        return best
+    return None
+
+
 def _split_inline_vs_general(review: dict[str, Any],
                              valid: dict[str, set[int]]) -> tuple[list[dict], list[dict]]:
-    """Map model comments to inline review comments + general fallbacks."""
+    """Map model comments to inline review comments + general fallbacks.
+
+    Tries hard to keep comments inline: if the model picks a line that
+    isn't on the RIGHT side of the diff (common when it anchors on a
+    semantic line just outside the hunk), snap to the nearest
+    commentable line within _SNAP_MAX_DISTANCE. Only fall back to a
+    general body-level note when there's no plausible nearby anchor.
+    """
     inline: list[dict[str, Any]] = []
     general: list[dict[str, Any]] = []
     for c in review.get("comments", []):
         f = (c.get("file") or "").strip()
         ln = c.get("line")
         body = _decorate_body(c)
-        if f and isinstance(ln, int) and ln in valid.get(f, set()):
+        valid_for_file = valid.get(f, set())
+        if f and isinstance(ln, int) and ln in valid_for_file:
             inline.append({"path": f, "line": ln, "side": "RIGHT", "body": body})
-        else:
-            general.append({"file": f, "body": body, "line": ln})
+            continue
+        if f and isinstance(ln, int) and valid_for_file:
+            snapped = _snap_to_valid_line(ln, valid_for_file)
+            if snapped is not None:
+                logging.info("snapped inline comment %s:%d -> %d (delta=%d)",
+                             f, ln, snapped, snapped - ln)
+                inline.append({"path": f, "line": snapped, "side": "RIGHT", "body": body})
+                continue
+        general.append({"file": f, "body": body, "line": ln})
     return inline, general
 
 
@@ -1104,9 +1200,14 @@ JSON to stdout. The JSON must match this schema:
   ]
 }
 
-PREFER inline comments anchored to a specific file + line on the RIGHT
-side of the current diff. Only omit `line` if the concern genuinely has
-no single anchor (rare).
+ALWAYS use inline comments anchored to a specific file + line on the
+RIGHT side of the current diff. The diff is annotated: every
+commentable line is prefixed with `[L<n>]` where `<n>` is the exact
+RIGHT-side line number to put in the `line` field. Deleted-only lines
+show `[L----]` and are NOT commentable — pick the nearest `[L<n>]`
+line. Do not invent line numbers; only use numbers that appear in a
+`[L<n>]` prefix. Only omit `line` if the concern genuinely has no
+single anchor (e.g. "this whole file should not exist").
 
 `addresses_prior_block`:
   - true  if your prior decision was "request_changes" and the author has
@@ -1270,8 +1371,8 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
             " Say so in your summary."
         )
     parts.append(trunc_note)
-    parts.append("\n\n--- Current unified diff ---\n")
-    parts.append(pr.diff)
+    parts.append("\n\n--- Current unified diff (each line prefixed with [L<n>] = RIGHT-side line number; copy this for your `line` field) ---\n")
+    parts.append(annotate_diff_with_line_numbers(pr.diff))
     parts.append("\n=== END ===\n\nReturn the JSON object now.")
     return "".join(parts)
 
