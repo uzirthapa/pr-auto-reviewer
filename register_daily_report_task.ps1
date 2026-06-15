@@ -1,6 +1,6 @@
 # Registers a Windows Scheduled Task to email the auto-review daily report
-# at 07:00 every day. Runs in the current user's session so it can use the
-# already-authenticated `copilot` CLI and its mail MCP.
+# at a chosen time of day (default 07:00, Mon-Fri). Runs in the current
+# user's session so it can drive Outlook via COM (see send_daily_report.py).
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   .\register_daily_report_task.ps1                  # 07:00 daily, real send

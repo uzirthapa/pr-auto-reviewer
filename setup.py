@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,13 @@ COPILOT_TIMEOUT = int(os.environ.get("COPILOT_SETUP_TIMEOUT", "180"))
 def _print_header(title: str) -> None:
     bar = "-" * max(8, len(title) + 4)
     print(f"\n{bar}\n  {title}\n{bar}")
+
+
+_HHMM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]?\d)\s*$")
+
+
+def _is_valid_hhmm(value: str) -> bool:
+    return bool(_HHMM_RE.match(value or ""))
 
 
 def _ask(prompt: str, default: str | None = None, *, required: bool = False,
@@ -437,13 +445,32 @@ def collect_config(existing: dict[str, Any], *, non_interactive: bool) -> dict[s
     else:
         rec_default = existing.get("report_recipient", "")
     recipient = _ask(
-        "Email to receive the daily 07:00 summary (blank to skip)",
+        "Email to receive the daily summary (blank to skip)",
         default=rec_default, non_interactive=non_interactive,
     )
     if recipient:
         cfg["report_recipient"] = recipient
-    elif "report_recipient" in cfg:
-        cfg.pop("report_recipient")
+        time_default = existing.get("report_time", "07:00")
+        while True:
+            report_time = _ask(
+                "Time of day to send the report (24h HH:MM, local time)",
+                default=time_default, non_interactive=non_interactive,
+            ).strip()
+            if _is_valid_hhmm(report_time):
+                # Normalize "7:5" -> "07:05" so the PS1 trigger is happy.
+                h, m = report_time.split(":")
+                cfg["report_time"] = f"{int(h):02d}:{int(m):02d}"
+                break
+            print(f"  '{report_time}' is not a valid 24h HH:MM time (e.g. 07:00, 18:30).")
+            if non_interactive:
+                # Don't loop forever in headless mode — fall back to default.
+                cfg["report_time"] = "07:00"
+                break
+    else:
+        if "report_recipient" in cfg:
+            cfg.pop("report_recipient")
+        if "report_time" in cfg:
+            cfg.pop("report_time")
 
     _print_header("3) Tell the reviewer about your codebase")
     print("""
@@ -548,15 +575,19 @@ and depth you want. Skip if you're happy with the defaults.
 # Scheduled tasks
 # ---------------------------------------------------------------------------
 
-def offer_register_tasks(*, non_interactive: bool) -> None:
+def offer_register_tasks(*, non_interactive: bool, cfg: dict[str, Any] | None = None) -> None:
     if os.name != "nt":
         print("\nScheduled tasks are Windows-only; skipping (you can wire up cron yourself).")
         return
+    cfg = cfg or {}
+    report_time = cfg.get("report_time", "07:00")
+    if not _is_valid_hhmm(report_time):
+        report_time = "07:00"
     _print_header("7) Windows Scheduled Tasks")
-    print("""
+    print(f"""
 Two tasks ship with this project:
   • AgenticAutomations-AutoReview   — runs every 5 min (auto_review.py)
-  • AgenticAutomations-DailyReport  — runs Mon-Fri 07:00 (send_daily_report.py)
+  • AgenticAutomations-DailyReport  — runs Mon-Fri {report_time} (send_daily_report.py)
 
 You can register them now, or run the .ps1 scripts manually later.
 """.rstrip())
@@ -572,10 +603,11 @@ You can register them now, or run the .ps1 scripts manually later.
         print(f"  Running: {' '.join(cmd)}")
         subprocess.run(cmd, check=False)
 
-    if _ask_yes_no("Register the daily 07:00 report task NOW?", default=False,
+    if _ask_yes_no(f"Register the daily {report_time} report task NOW?", default=False,
                    non_interactive=non_interactive):
         cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-               "-File", str(SCRIPT_DIR / "register_daily_report_task.ps1")]
+               "-File", str(SCRIPT_DIR / "register_daily_report_task.ps1"),
+               "-At", report_time]
         print(f"  Running: {' '.join(cmd)}")
         subprocess.run(cmd, check=False)
 
@@ -668,7 +700,7 @@ def main() -> int:
        python auto_review.py
 """.rstrip())
 
-    offer_register_tasks(non_interactive=args.non_interactive)
+    offer_register_tasks(non_interactive=args.non_interactive, cfg=cfg)
 
     return 0
 
