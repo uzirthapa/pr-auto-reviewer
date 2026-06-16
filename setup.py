@@ -39,7 +39,7 @@ EXAMPLE_PATH = SCRIPT_DIR / "config.example.json"
 # Reuse the same Copilot model / effort the reviewer uses, so elaboration
 # matches its voice. Elaboration is much shorter than a review so we give
 # it a tighter timeout.
-COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.7-1m-internal")
+COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.8")
 COPILOT_EFFORT = os.environ.get("COPILOT_SETUP_EFFORT", "medium")
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_SETUP_TIMEOUT", "180"))
 

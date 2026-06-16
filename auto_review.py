@@ -76,7 +76,7 @@ REVIEWS_DIR = SCRIPT_DIR / "reviews"
 METRICS_PATH = REVIEWS_DIR / "metrics.jsonl"
 
 # Copilot model + reasoning effort. Architecture review is non-trivial.
-COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.7-1m-internal")
+COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.8")
 COPILOT_EFFORT = os.environ.get("COPILOT_REVIEW_EFFORT", "high")
 
 # Hard wall-clock cap for the Copilot review call (seconds).

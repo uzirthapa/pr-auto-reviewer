@@ -89,7 +89,7 @@ cd C:\Users\uzirthapa\CodeReviewAgentDesigner
 
 ## Tuning
 Environment variables:
-- `COPILOT_REVIEW_MODEL` (default `claude-opus-4.7-1m-internal`)
+- `COPILOT_REVIEW_MODEL` (default `claude-opus-4.8`)
 - `COPILOT_REVIEW_EFFORT` (default `high`)
 - `COPILOT_REVIEW_TIMEOUT` seconds (default `900`)
 
@@ -302,7 +302,7 @@ Focus areas:
   > telemetry on error paths
   >
   Expand these focus items into detailed reviewer guidance using Copilot? [Y/n]: >
-  Elaborating 4 focus item(s) via copilot (claude-opus-4.7-1m-internal, effort=medium, ~30-90s)…
+  Elaborating 4 focus item(s) via copilot (claude-opus-4.8, effort=medium, ~30-90s)…
   Elaboration done in 28.4s.
 
   --- focus items (before -> after) ---
