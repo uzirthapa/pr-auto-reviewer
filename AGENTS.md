@@ -30,12 +30,18 @@ list_open_prs  ──►  fingerprint short-circuit  ──►  per-PR loop
 ```
 
 Per-cycle flow (every 5 min via Scheduled Task):
-1. `gh pr list ... review-requested:@me` → `PullRequest` list.
+1. `gh pr list ... review-requested:@me` **unioned with**
+   `reviewed-by:@me` → `PullRequest` list (each tagged `review_requested`).
+   The `reviewed-by` arm catches authors pushing new commits AFTER we
+   reviewed — GitHub removes us from the requested set once we submit a
+   review, so without it we'd stop tracking the PR.
 2. SHA-256 fingerprint of `[(number, head_sha, updated_at), ...]`. If
    unchanged since last run and not `--force` / `--only-pr`, exit early
    without per-PR work.
 3. For each PR, `decide_action(state, pr)` returns one of:
-   - `skip` — already handled at this HEAD, no new author activity
+   - `skip` — already handled at this HEAD, no new author activity. A
+     `reviewed-by`-only PR (we're no longer requested) is skipped cheaply
+     BEFORE the activity fetch unless its HEAD moved (new code).
    - `review` — never reviewed, or HEAD moved with prior non-block decision
    - `reconsider` — prior decision was a block, or author replied / pushed
      / re-requested us since our last action
@@ -167,7 +173,7 @@ python -c "import tempfile, json, setup, pathlib; setup.CONFIG_PATH = pathlib.Pa
 
 | Concern                        | Where                                                      |
 | ------------------------------ | ---------------------------------------------------------- |
-| PR listing + fingerprint       | `list_open_prs`, `compute_prs_fingerprint` (~lines 170-220) |
+| PR listing (requested ∪ reviewed-by) + fingerprint | `list_open_prs`, `compute_prs_fingerprint` |
 | Decision routing               | `review_pr` (initial path) / `reconsider_pr` (any prior-state path) |
 | Initial prompt + rendering     | `REVIEW_INSTRUCTIONS_TEMPLATE`, `_render_review_instructions` |
 | Reconsider state machine prompt| `RECONSIDER_INSTRUCTIONS`                                   |
