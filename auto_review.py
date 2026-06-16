@@ -212,33 +212,47 @@ class PullRequest:
     body: str
     url: str
     updated_at: str = ""
+    review_requested: bool = False
     files: list[dict[str, Any]] = field(default_factory=list)
     diff: str = ""
     diff_truncated: bool = False
 
 
 def list_open_prs(repo: str) -> list[PullRequest]:
-    """List open, non-draft PRs where the authenticated user is a
-    requested reviewer."""
-    prs: list[PullRequest] = []
+    """List open, non-draft PRs we should look at:
+
+      - `review-requested:@me` — new PRs and explicit re-requests, AND
+      - `reviewed-by:@me` — PRs we already reviewed. GitHub drops us from
+        the requested set the moment we submit a review, so without this
+        second search we'd never notice an author pushing NEW commits
+        after our review. These come back flagged review_requested=False;
+        reconsider_pr only re-runs them when their HEAD has actually moved
+        (see its cheap no-new-code gate), so the sweep stays inexpensive.
+    """
     fields = "number,title,author,headRefOid,baseRefName,headRefName,isDraft,body,url,updatedAt"
-    res = gh([
-        "pr", "list",
-        "--repo", repo,
-        "--search", "is:pr is:open review-requested:@me",
-        "--limit", "200",
-        "--json", fields,
-    ])
-    try:
-        data = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
-        logging.error("Failed to parse PR list")
-        return prs
-    for p in data:
+
+    def _search(query: str) -> list[dict[str, Any]]:
+        res = gh(["pr", "list", "--repo", repo, "--search", query,
+                  "--limit", "200", "--json", fields])
+        try:
+            return json.loads(res.stdout or "[]")
+        except json.JSONDecodeError:
+            logging.error("Failed to parse PR list for query: %s", query)
+            return []
+
+    requested = _search("is:pr is:open review-requested:@me")
+    reviewed = _search("is:pr is:open reviewed-by:@me")
+    requested_nums = {p["number"] for p in requested}
+
+    by_num: dict[int, PullRequest] = {}
+    for p in requested + reviewed:
         if p.get("isDraft"):
             continue
-        prs.append(PullRequest(
-            number=p["number"],
+        num = p["number"]
+        if num in by_num:
+            continue
+        by_num[num] = PullRequest(
+            number=num,
             title=p.get("title", ""),
             author=(p.get("author") or {}).get("login", "?"),
             head_sha=p.get("headRefOid", ""),
@@ -248,8 +262,9 @@ def list_open_prs(repo: str) -> list[PullRequest]:
             body=p.get("body") or "",
             url=p.get("url", ""),
             updated_at=p.get("updatedAt", ""),
-        ))
-    prs.sort(key=lambda x: x.number)
+            review_requested=(num in requested_nums),
+        )
+    prs = sorted(by_num.values(), key=lambda x: x.number)
     return prs
 
 
@@ -1764,8 +1779,17 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
     if not last_action_iso:
         return "skip-no-watermark"
 
-    activity = fetch_pr_activity_since(repo, pr.number, last_action_iso)
     head_changed = pr.head_sha != prev.get("head_sha")
+
+    # Cheap gate for the `reviewed-by:@me` sweep: a PR we already reviewed
+    # but are NO LONGER requested on only warrants another look when NEW
+    # CODE has landed (HEAD moved). If HEAD is unchanged, skip before the
+    # expensive activity fetch — we don't chase replies on PRs we're not
+    # assigned to. (Requested PRs still get the full activity-based path.)
+    if not forced and not pr.review_requested and not head_changed:
+        return "skip-reviewed-no-new-code"
+
+    activity = fetch_pr_activity_since(repo, pr.number, last_action_iso)
     prior_decision = (prev.get("decision") or "").lower()
     code_changed = head_changed or bool(activity.get("new_commits"))
 
@@ -1876,7 +1900,12 @@ def review_pr(repo: str, pr: PullRequest, state: dict[str, Any],
     prev = state.get(key) or {}
 
     if not prev:
-        # Never reviewed → fresh review path.
+        # Never reviewed by this tool. Only do a fresh review if we're an
+        # actual requested reviewer. A PR surfaced solely via
+        # `reviewed-by:@me` with no state means we reviewed it outside
+        # this tool — don't barge in with a fresh automated review.
+        if not pr.review_requested:
+            return "skip-reviewed-elsewhere-no-state"
         return _do_fresh_review(repo, pr, state, dry_run)
 
     # We have prior state. Reconsider handles all triggers (head changed,
@@ -1947,13 +1976,13 @@ def main() -> int:
     except Exception as e:
         logging.error("Failed to list PRs: %s", e)
         return 2
-    logging.info("Found %d open non-draft PR(s) with review requested for %s",
+    logging.info("Found %d open non-draft PR(s) requested-of or already-reviewed-by %s",
                  len(prs), me)
 
     if args.only_pr is not None:
         prs = [p for p in prs if p.number == args.only_pr]
         if not prs:
-            logging.warning("PR #%s not currently in 'review-requested:@me' set",
+            logging.warning("PR #%s not in the open requested-of / reviewed-by set",
                             args.only_pr)
 
     # Cheap-polling short-circuit: if nothing in the PR list has changed
