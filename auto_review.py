@@ -1056,6 +1056,7 @@ def fetch_pr_activity_since(repo: str, pr_number: int, since_iso: str
     out: dict[str, Any] = {
         "issue_comments": [],
         "review_comments": [],
+        "review_threads": [],
         "new_commits": [],
         "rerequests": [],
     }
@@ -1099,6 +1100,43 @@ def fetch_pr_activity_since(repo: str, pr_number: int, since_iso: str
             "body": (c.get("body") or "").strip(),
             "in_reply_to_id": c.get("in_reply_to_id"),
             "url": c.get("html_url"),
+        })
+
+    # Reconstruct full inline threads so a reconsider can read the
+    # author's rebuttal IN CONTEXT of the original concern — including our
+    # OWN prior comment, which is filtered out of the flat list above.
+    # GitHub sets in_reply_to_id to the thread's root comment, so group by
+    # (in_reply_to_id or id). A thread is surfaced only when it has at
+    # least one NEW (post-watermark) comment from someone other than us —
+    # i.e. an actual reply worth re-evaluating.
+    by_id = {c.get("id"): c for c in review_comments if c.get("id") is not None}
+    threads: dict[Any, list[dict]] = {}
+    for c in review_comments:
+        root = c.get("in_reply_to_id") or c.get("id")
+        threads.setdefault(root, []).append(c)
+    for root, msgs in threads.items():
+        msgs.sort(key=lambda m: m.get("created_at") or "")
+        has_new_reply = any(
+            (m.get("user") or {}).get("login") != me
+            and (m.get("created_at") or "") > since_iso
+            for m in msgs
+        )
+        if not has_new_reply:
+            continue
+        root_msg = by_id.get(root) or msgs[0]
+        out["review_threads"].append({
+            "file": root_msg.get("path"),
+            "line": root_msg.get("line") or root_msg.get("original_line"),
+            "messages": [
+                {
+                    "author": (m.get("user") or {}).get("login", "?"),
+                    "is_me": (m.get("user") or {}).get("login") == me,
+                    "created_at": m.get("created_at"),
+                    "body": (m.get("body") or "").strip(),
+                    "is_new": (m.get("created_at") or "") > since_iso,
+                }
+                for m in msgs
+            ],
         })
 
     commits = _gh_json([
@@ -1171,7 +1209,10 @@ You will be given:
   - The PR metadata.
   - Your prior review (decision, summary, comments).
   - All new activity since your prior action: author replies, new
-    commits, and any explicit re-review requests.
+    commits, and any explicit re-review requests. Inline replies are
+    presented as full THREADS — your original comment followed by the
+    author's reply (NEW replies are marked) — so you can judge each
+    rebuttal against the exact concern it answers.
   - The CURRENT unified diff. If HEAD has not changed, this is the same
     diff you reviewed; if HEAD changed, it reflects the latest state.
 
@@ -1246,16 +1287,26 @@ Decision rubric (THREE STATES — bias toward APPROVE; reserve
     alive just because nits remain.
 
 State machine when prior decision was "request_changes":
-  1. Read every author reply (inline + issue comments) carefully.
+  1. Read every author reply (inline THREADS + issue comments)
+     carefully. For each inline thread, match the author's reply to YOUR
+     original comment at the top of that same thread — the rebuttal is
+     answering that specific concern.
   2. For each blocking concern from your prior review, classify the
      author's response as: ADDRESSED (code change or convincing
      rationale), DISPUTED (rationale exists but you disagree),
      IGNORED (no response or non-responsive).
-  3. If ALL blockers are ADDRESSED → "approve".
+  3. If ALL blockers are ADDRESSED → "approve". A sound reply that
+     correctly explains why your concern does not apply (e.g. points to
+     existing handling you missed, cites a constraint, or shows the
+     behavior is intentional and safe) counts as ADDRESSED even with NO
+     code change — lift the block.
   4. If at least one is IGNORED OR clearly wrong → "request_changes".
   5. If the only remaining blockers are DISPUTED (author gave a
      plausible reason, you still disagree) → "comment" — drop the
      block, record disagreement, defer to the author.
+  Do NOT keep a block alive on a concern the author has soundly rebutted
+  just because there was no code change. Engage with the reply; if it
+  holds up, the block must come down.
 
 Rules:
   - Engage with what the author actually said. Quote a short snippet of
@@ -1295,6 +1346,7 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
 
     issue_comments = activity.get("issue_comments", [])
     review_comments = activity.get("review_comments", [])
+    review_threads = activity.get("review_threads", [])
     new_commits = activity.get("new_commits", [])
 
     def _fmt_list(items: list[str]) -> str:
@@ -1353,14 +1405,19 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
     else:
         parts.append("  (none)\n")
 
-    parts.append("\n-- Inline review-thread comments --\n")
-    if review_comments:
-        for c in review_comments:
-            reply_note = f" (reply to comment {c['in_reply_to_id']})" if c.get("in_reply_to_id") else ""
-            parts.append(
-                f"\n[{c['created_at']}] {c['author']} on `{c.get('file') or '?'}`{reply_note}:\n"
-                f"{c['body']}\n"
-            )
+    parts.append("\n-- Inline review threads (full context: your original comment AND the replies; NEW replies since your last action are marked [NEW]) --\n")
+    if review_threads:
+        for t in review_threads:
+            anchor = f"`{t.get('file') or '?'}`"
+            if t.get("line"):
+                anchor += f":{t['line']}"
+            parts.append(f"\nThread on {anchor}:\n")
+            for m in t.get("messages", []):
+                who = "YOU (prior reviewer)" if m.get("is_me") else f"{m.get('author','?')} (author/other)"
+                new_tag = " [NEW]" if m.get("is_new") and not m.get("is_me") else ""
+                parts.append(f"  [{m.get('created_at')}] {who}{new_tag}:\n")
+                indented = "\n".join("    " + ln for ln in (m.get("body","") or "").splitlines())
+                parts.append(indented + "\n")
     else:
         parts.append("  (none)\n")
 
