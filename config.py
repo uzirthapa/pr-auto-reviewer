@@ -8,6 +8,11 @@ Schema (all optional):
   gh_host                 GitHub host, e.g. "microsoft.ghe.com" or "github.com"
   repo                    "owner/name" of the repo to review
   report_recipient        email address for the daily summary
+  report_time             "HH:MM" 24h local time to send the daily report
+  review_model            Copilot model id for reviews (e.g.
+                          "claude-opus-4.8"). Omit to auto-use the latest
+                          Opus the local Copilot CLI is set to. Overridden
+                          by the COPILOT_REVIEW_MODEL env var.
   codebase_description    one-sentence description of the codebase,
                           inlined into the reviewer prompt so the model
                           has context about the product/stack

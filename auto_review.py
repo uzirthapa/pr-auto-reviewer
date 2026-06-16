@@ -76,8 +76,36 @@ REVIEWS_DIR = SCRIPT_DIR / "reviews"
 METRICS_PATH = REVIEWS_DIR / "metrics.jsonl"
 
 # Copilot model + reasoning effort. Architecture review is non-trivial.
-COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.8")
+def _latest_opus_model() -> str:
+    """Resolve the latest Opus model dynamically so the reviewer auto-tracks
+    new Opus releases instead of pinning a version that goes stale.
+
+    Reads the local Copilot CLI's own configured model from
+    ~/.copilot/settings.json (zero cost, instant) and uses it when it's an
+    Opus build — the CLI keeps this current as the user upgrades. Falls back
+    to a known-good Opus if settings are missing or set to a non-Opus model.
+    """
+    fallback = "claude-opus-4.8"
+    try:
+        settings = json.loads(
+            (Path.home() / ".copilot" / "settings.json").read_text("utf-8")
+        )
+        model = (settings.get("model") or "").strip()
+        if model.startswith("claude-opus-"):
+            return model
+    except Exception:
+        pass
+    return fallback
+
+
+# Precedence: COPILOT_REVIEW_MODEL env (ops override) > config.json
+# "review_model" (set via setup.py) > dynamic latest-Opus default.
+COPILOT_MODEL = (os.environ.get("COPILOT_REVIEW_MODEL")
+                 or _user_config.get("review_model")
+                 or _latest_opus_model())
 COPILOT_EFFORT = os.environ.get("COPILOT_REVIEW_EFFORT", "high")
+# "high context thinking": long context window tier for big diffs.
+COPILOT_CONTEXT = os.environ.get("COPILOT_REVIEW_CONTEXT", "long_context")
 
 # Hard wall-clock cap for the Copilot review call (seconds).
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_REVIEW_TIMEOUT", "900"))
@@ -1545,14 +1573,15 @@ def run_copilot_review_call(prompt: str,
             "copilot",
             "--model", COPILOT_MODEL,
             "--effort", COPILOT_EFFORT,
+            "--context", COPILOT_CONTEXT,
             "--allow-all-tools",
             "--add-dir", str(tmp_dir),
             "--no-color",
             "-p", short_prompt,
         ]
         logging.info(
-            "Invoking copilot (model=%s, effort=%s, prompt=%d chars on disk)",
-            COPILOT_MODEL, COPILOT_EFFORT, len(prompt),
+            "Invoking copilot (model=%s, effort=%s, context=%s, prompt=%d chars on disk)",
+            COPILOT_MODEL, COPILOT_EFFORT, COPILOT_CONTEXT, len(prompt),
         )
         t0 = time.time()
         res = subprocess.run(

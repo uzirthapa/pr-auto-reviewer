@@ -88,9 +88,15 @@ cd C:\Users\uzirthapa\CodeReviewAgentDesigner
 ```
 
 ## Tuning
+The review model can be set three ways (highest precedence first):
+`COPILOT_REVIEW_MODEL` env var → `review_model` in `config.json` (set via
+`setup.py`) → dynamic default (the latest Opus your Copilot CLI is set to,
+read from `~/.copilot/settings.json`, falling back to `claude-opus-4.8`).
+
 Environment variables:
-- `COPILOT_REVIEW_MODEL` (default `claude-opus-4.8`)
+- `COPILOT_REVIEW_MODEL` (default: latest Opus, auto-resolved)
 - `COPILOT_REVIEW_EFFORT` (default `high`)
+- `COPILOT_REVIEW_CONTEXT` (default `long_context`)
 - `COPILOT_REVIEW_TIMEOUT` seconds (default `900`)
 
 ## Daily morning report

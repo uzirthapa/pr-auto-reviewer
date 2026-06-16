@@ -39,7 +39,24 @@ EXAMPLE_PATH = SCRIPT_DIR / "config.example.json"
 # Reuse the same Copilot model / effort the reviewer uses, so elaboration
 # matches its voice. Elaboration is much shorter than a review so we give
 # it a tighter timeout.
-COPILOT_MODEL = os.environ.get("COPILOT_REVIEW_MODEL", "claude-opus-4.8")
+def _latest_opus_model() -> str:
+    """Latest Opus the local Copilot CLI is set to (mirrors auto_review's
+    resolver) so elaboration tracks new Opus releases. Falls back to a
+    known-good Opus when settings are missing or set to a non-Opus model."""
+    try:
+        settings = json.loads(
+            (Path.home() / ".copilot" / "settings.json").read_text("utf-8")
+        )
+        model = (settings.get("model") or "").strip()
+        if model.startswith("claude-opus-"):
+            return model
+    except Exception:
+        pass
+    return "claude-opus-4.8"
+
+
+COPILOT_MODEL = (os.environ.get("COPILOT_REVIEW_MODEL")
+                 or _latest_opus_model())
 COPILOT_EFFORT = os.environ.get("COPILOT_SETUP_EFFORT", "medium")
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_SETUP_TIMEOUT", "180"))
 
@@ -472,7 +489,27 @@ def collect_config(existing: dict[str, Any], *, non_interactive: bool) -> dict[s
         if "report_time" in cfg:
             cfg.pop("report_time")
 
-    _print_header("3) Tell the reviewer about your codebase")
+    _print_header("3) Reviewer model")
+    print("""
+Which Copilot model performs the reviews. Leave BLANK to automatically
+use the latest Opus model your Copilot CLI is set to (recommended — it
+stays current as new Opus versions ship, with long-context + high
+reasoning effort). Enter a specific id to pin one instead.
+
+  Examples: claude-opus-4.8, claude-sonnet-4.6, gpt-5.5
+  Tip: override per-run any time with the COPILOT_REVIEW_MODEL env var.
+""".rstrip())
+    review_model = _ask(
+        "Reviewer model (blank = latest Opus, auto)",
+        default=existing.get("review_model", ""),
+        non_interactive=non_interactive,
+    ).strip()
+    if review_model:
+        cfg["review_model"] = review_model
+    elif "review_model" in cfg:
+        cfg.pop("review_model")
+
+    _print_header("4) Tell the reviewer about your codebase")
     print("""
 This one sentence is injected into the reviewer prompt so the model has
 real context about the product / stack it's reviewing. Be concrete —
@@ -490,7 +527,7 @@ think 'pitch the codebase to a senior engineer in one line'.
     )
     cfg["codebase_description"] = codebase
 
-    _print_header("4) What should the reviewer focus on?")
+    _print_header("5) What should the reviewer focus on?")
     print("""
 List specific concerns this reviewer should ALWAYS look out for. These are
 *on top of* the built-in defaults (correctness, security, performance,
@@ -524,7 +561,7 @@ architecture, dependency hygiene). One item per line, blank line to finish.
         non_interactive=non_interactive,
     )
 
-    _print_header("5) What should the reviewer NEVER comment on?")
+    _print_header("6) What should the reviewer NEVER comment on?")
     print("""
 Items the reviewer will be told to skip even if it notices them. Use this
 to silence noise specific to your codebase (e.g. generated code, formatter
@@ -545,7 +582,7 @@ choices, things you have a linter for). One per line, blank line to finish.
         non_interactive=non_interactive,
     )
 
-    _print_header("6) Reviewer style / voice")
+    _print_header("7) Reviewer style / voice")
     print("""
 Free-form prose appended to the reviewer prompt. Tell the model what tone
 and depth you want. Skip if you're happy with the defaults.
@@ -583,7 +620,7 @@ def offer_register_tasks(*, non_interactive: bool, cfg: dict[str, Any] | None = 
     report_time = cfg.get("report_time", "07:00")
     if not _is_valid_hhmm(report_time):
         report_time = "07:00"
-    _print_header("7) Windows Scheduled Tasks")
+    _print_header("8) Windows Scheduled Tasks")
     print(f"""
 Two tasks ship with this project:
   • AgenticAutomations-AutoReview   — runs every 5 min (auto_review.py)
