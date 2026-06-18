@@ -76,6 +76,24 @@ def load_records(hours: int) -> list[dict]:
     return out
 
 
+def _format_kinds(events: list[dict]) -> str:
+    """Compact, email-friendly summary of a PR's event types.
+
+    The old `"+".join(...)` produced an ever-growing unbreakable token like
+    `review+reconsider+reconsider+reconsider+...` that stretched the column
+    horizontally. Collapse repeats into counts and use spaces so the cell
+    can wrap: e.g. "review", "5 re-reviews", "review + 5 re-reviews".
+    """
+    n_review = sum(1 for e in events if e.get("kind") == "review")
+    n_recon = sum(1 for e in events if e.get("kind") == "reconsider")
+    parts = []
+    if n_review:
+        parts.append("review" if n_review == 1 else f"{n_review} reviews")
+    if n_recon:
+        parts.append("re-review" if n_recon == 1 else f"{n_recon} re-reviews")
+    return " + ".join(parts) or "?"
+
+
 def render_html(records: list[dict], hours: int) -> str:
     now_local = datetime.now().strftime("%a %b %d %Y %H:%M %Z").strip()
     if not records:
@@ -108,7 +126,7 @@ def render_html(records: list[dict], hours: int) -> str:
         slot = by_pr[n]
         latest = slot["latest"]
         events = slot["events"]
-        kinds = "+".join(e.get("kind","?") for e in events)
+        kinds = _format_kinds(events)
         issues_total = sum(e.get("issues_count") or 0 for e in events)
         url = latest.get("pr_url") or "#"
         author = escape(latest.get("pr_author") or "?")
