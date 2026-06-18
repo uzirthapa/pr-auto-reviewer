@@ -97,6 +97,7 @@ Environment variables:
 - `COPILOT_REVIEW_MODEL` (default: latest Opus, auto-resolved)
 - `COPILOT_REVIEW_EFFORT` (default `high`)
 - `COPILOT_REVIEW_CONTEXT` (default `long_context`)
+- `COPILOT_REVIEW_CONCURRENCY` PRs reviewed in parallel (default `5`, max `10`; also `review_concurrency` in `config.json`)
 - `COPILOT_REVIEW_TIMEOUT` seconds (default `900`)
 
 ## Daily morning report

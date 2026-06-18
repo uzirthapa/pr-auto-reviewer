@@ -509,6 +509,29 @@ reasoning effort). Enter a specific id to pin one instead.
     elif "review_model" in cfg:
         cfg.pop("review_model")
 
+    print("""
+How many PRs to review in PARALLEL each cycle. Each review is a separate
+Copilot call, so higher values drain a backlog faster but use more CPU /
+memory / API at once. 1-10; 5 is a good default.
+""".rstrip())
+    conc_default = str(existing.get("review_concurrency", 5))
+    while True:
+        conc_raw = _ask(
+            "Parallel reviews (1-10)",
+            default=conc_default, non_interactive=non_interactive,
+        ).strip()
+        try:
+            conc = int(conc_raw)
+        except ValueError:
+            conc = -1
+        if 1 <= conc <= 10:
+            cfg["review_concurrency"] = conc
+            break
+        print(f"  '{conc_raw}' is not an integer between 1 and 10.")
+        if non_interactive:
+            cfg["review_concurrency"] = 5
+            break
+
     _print_header("4) Tell the reviewer about your codebase")
     print("""
 This one sentence is injected into the reviewer prompt so the model has

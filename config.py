@@ -13,6 +13,9 @@ Schema (all optional):
                           "claude-opus-4.8"). Omit to auto-use the latest
                           Opus the local Copilot CLI is set to. Overridden
                           by the COPILOT_REVIEW_MODEL env var.
+  review_concurrency      how many PRs to review in parallel (int, 1-10,
+                          default 5). Overridden by the
+                          COPILOT_REVIEW_CONCURRENCY env var.
   codebase_description    one-sentence description of the codebase,
                           inlined into the reviewer prompt so the model
                           has context about the product/stack

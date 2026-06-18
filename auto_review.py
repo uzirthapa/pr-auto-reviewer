@@ -40,7 +40,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -110,6 +112,30 @@ COPILOT_CONTEXT = os.environ.get("COPILOT_REVIEW_CONTEXT", "long_context")
 # Hard wall-clock cap for the Copilot review call (seconds).
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_REVIEW_TIMEOUT", "900"))
 
+# How many PRs to review in parallel. Each review is a separate Copilot
+# subprocess (mostly I/O-bound waiting on the model), so running several
+# at once drains the per-cycle backlog far faster. Precedence:
+# COPILOT_REVIEW_CONCURRENCY env > config.json "review_concurrency" > 5.
+# Capped at 10 to bound memory / API load from concurrent copilot processes.
+def _review_concurrency() -> int:
+    raw = (os.environ.get("COPILOT_REVIEW_CONCURRENCY")
+           or _user_config.get("review_concurrency") or 5)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = 5
+    return max(1, min(n, 10))
+
+
+REVIEW_CONCURRENCY = _review_concurrency()
+
+# Serialize the shared-resource writes that the parallel PR workers touch:
+# state.json (whole-dict serialize) and metrics.jsonl (append). The
+# expensive Copilot call and GitHub I/O run OUTSIDE these locks, in
+# parallel; only the quick persistence steps are serialized.
+_STATE_LOCK = threading.RLock()
+_METRICS_LOCK = threading.Lock()
+
 # Disk hygiene for Copilot CLI side-effects.
 #   - Each `copilot -p` invocation creates a fresh ~/.copilot/session-state/<uuid>
 #     folder (events.jsonl, session.db, checkpoints, ...). The CLI never
@@ -162,9 +188,12 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    tmp = STATE_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    tmp.replace(STATE_PATH)
+    # Serialize under the state lock so a parallel worker mutating its own
+    # PR entry can't change the dict mid-serialization.
+    with _STATE_LOCK:
+        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(STATE_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -1711,56 +1740,59 @@ def append_metrics(pr: PullRequest, review: dict[str, Any], *,
                 "review_comments": len(activity.get("review_comments", [])),
                 "new_commits": len(activity.get("new_commits", [])),
             }
-    with METRICS_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with _METRICS_LOCK:
+        with METRICS_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _record_initial_review(state: dict[str, Any], pr: PullRequest,
                            review: dict[str, Any], review_id: str | None,
                            dry_run: bool) -> None:
-    state[str(pr.number)] = {
-        "head_sha": pr.head_sha,
-        "decision": review["decision"],
-        "review_id": review_id,
-        "reviewed_at": int(time.time()),
-        "reviewed_at_iso": _iso_now(),
-        "review_summary": review["summary"],
-        "review_comments": review["comments"],
-        "dry_run": dry_run,
-        "reconsiders": [],
-    }
+    with _STATE_LOCK:
+        state[str(pr.number)] = {
+            "head_sha": pr.head_sha,
+            "decision": review["decision"],
+            "review_id": review_id,
+            "reviewed_at": int(time.time()),
+            "reviewed_at_iso": _iso_now(),
+            "review_summary": review["summary"],
+            "review_comments": review["comments"],
+            "dry_run": dry_run,
+            "reconsiders": [],
+        }
 
 
 def _record_reconsider(state: dict[str, Any], pr: PullRequest,
                        review: dict[str, Any], review_id: str | None,
                        activity: dict[str, Any], dry_run: bool) -> None:
-    entry = state.get(str(pr.number)) or {}
-    history = entry.get("reconsiders") or []
-    history.append({
-        "at": int(time.time()),
-        "at_iso": _iso_now(),
-        "prior_decision": entry.get("decision"),
-        "prior_head_sha": entry.get("head_sha"),
-        "head_sha": pr.head_sha,
-        "decision": review["decision"],
-        "addresses_prior_block": review.get("addresses_prior_block"),
-        "remaining_concerns": review.get("remaining_concerns", []),
-        "review_id": review_id,
-        "trigger": {
-            "head_changed": pr.head_sha != entry.get("head_sha"),
-            "rerequests": len(activity.get("rerequests", [])),
-            "issue_comments": len(activity.get("issue_comments", [])),
-            "review_comments": len(activity.get("review_comments", [])),
-            "new_commits": len(activity.get("new_commits", [])),
-        },
-        "summary": review["summary"],
-        "dry_run": dry_run,
-    })
-    entry["reconsiders"] = history
-    # Effective current state moves forward.
-    entry["decision"] = review["decision"]
-    entry["head_sha"] = pr.head_sha
-    state[str(pr.number)] = entry
+    with _STATE_LOCK:
+        entry = state.get(str(pr.number)) or {}
+        history = entry.get("reconsiders") or []
+        history.append({
+            "at": int(time.time()),
+            "at_iso": _iso_now(),
+            "prior_decision": entry.get("decision"),
+            "prior_head_sha": entry.get("head_sha"),
+            "head_sha": pr.head_sha,
+            "decision": review["decision"],
+            "addresses_prior_block": review.get("addresses_prior_block"),
+            "remaining_concerns": review.get("remaining_concerns", []),
+            "review_id": review_id,
+            "trigger": {
+                "head_changed": pr.head_sha != entry.get("head_sha"),
+                "rerequests": len(activity.get("rerequests", [])),
+                "issue_comments": len(activity.get("issue_comments", [])),
+                "review_comments": len(activity.get("review_comments", [])),
+                "new_commits": len(activity.get("new_commits", [])),
+            },
+            "summary": review["summary"],
+            "dry_run": dry_run,
+        })
+        entry["reconsiders"] = history
+        # Effective current state moves forward.
+        entry["decision"] = review["decision"]
+        entry["head_sha"] = pr.head_sha
+        state[str(pr.number)] = entry
 
 
 def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
@@ -2003,7 +2035,8 @@ def main() -> int:
     save_state(state)
 
     results: list[tuple[int, str]] = []
-    for pr in prs:
+
+    def _process(pr: PullRequest) -> tuple[int, str]:
         try:
             status = review_pr(args.repo, pr, state, args.dry_run, args.force)
         except subprocess.TimeoutExpired:
@@ -2012,9 +2045,23 @@ def main() -> int:
         except Exception as e:
             logging.exception("Failed reviewing PR #%s: %s", pr.number, e)
             status = f"error:{type(e).__name__}"
-        results.append((pr.number, status))
         # Persist after every PR so a crash doesn't lose progress.
+        # save_state is lock-guarded, so concurrent workers are safe.
         save_state(state)
+        return (pr.number, status)
+
+    workers = max(1, min(REVIEW_CONCURRENCY, len(prs)))
+    if workers > 1 and len(prs) > 1:
+        logging.info("Reviewing %d PR(s) with %d parallel worker(s)", len(prs), workers)
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="review") as ex:
+            futures = {ex.submit(_process, pr): pr for pr in prs}
+            for fut in as_completed(futures):
+                results.append(fut.result())
+        results.sort(key=lambda r: r[0])
+    else:
+        for pr in prs:
+            results.append(_process(pr))
 
     print("\nSummary:")
     for num, status in results:
