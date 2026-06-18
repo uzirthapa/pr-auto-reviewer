@@ -5,6 +5,7 @@
   "report_time": "07:00",
   "review_model": "claude-opus-4.8",
   "review_concurrency": 5,
+  "priority_authors": ["a-teammate-login"],
   "codebase_description": "a TypeScript / React / Node monorepo for <product name and what it does>",
   "review_focus": [
     "API contracts between the frontend and backend — flag any drift",

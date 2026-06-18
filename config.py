@@ -16,6 +16,10 @@ Schema (all optional):
   review_concurrency      how many PRs to review in parallel (int, 1-10,
                           default 5). Overridden by the
                           COPILOT_REVIEW_CONCURRENCY env var.
+  priority_authors        list[str] of GitHub logins whose PRs are
+                          reviewed first each cycle. Overridden by the
+                          COPILOT_REVIEW_PRIORITY_AUTHORS env var
+                          (comma-separated).
   codebase_description    one-sentence description of the codebase,
                           inlined into the reviewer prompt so the model
                           has context about the product/stack

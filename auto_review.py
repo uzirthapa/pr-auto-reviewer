@@ -129,6 +129,34 @@ def _review_concurrency() -> int:
 
 REVIEW_CONCURRENCY = _review_concurrency()
 
+# Authors whose PRs jump to the front of the per-cycle queue, so they get
+# the first available workers (and get reviewed first when a backlog can't
+# clear within the scheduled-task time limit). Precedence:
+# COPILOT_REVIEW_PRIORITY_AUTHORS env (comma-separated) > config.json
+# "priority_authors" (list) > none. Matching is case-insensitive.
+def _priority_authors() -> set[str]:
+    raw = os.environ.get("COPILOT_REVIEW_PRIORITY_AUTHORS")
+    if raw is not None:
+        items = [a.strip() for a in raw.split(",")]
+    else:
+        items = _user_config.get("priority_authors") or []
+    return {str(a).strip().lower() for a in items if str(a).strip()}
+
+
+PRIORITY_AUTHORS = _priority_authors()
+
+
+def prioritize_prs(prs: list[PullRequest]) -> list[PullRequest]:
+    """Order PRs so prioritized authors come first, each group otherwise
+    keeping ascending-number order for determinism."""
+    if not PRIORITY_AUTHORS:
+        return prs
+    return sorted(
+        prs,
+        key=lambda p: (0 if (p.author or "").lower() in PRIORITY_AUTHORS else 1,
+                       p.number),
+    )
+
 # Serialize the shared-resource writes that the parallel PR workers touch:
 # state.json (whole-dict serialize) and metrics.jsonl (append). The
 # expensive Copilot call and GitHub I/O run OUTSIDE these locks, in
@@ -2033,6 +2061,15 @@ def main() -> int:
         return 0
     state["__last_prs_fingerprint"] = fingerprint
     save_state(state)
+
+    # Order so prioritized authors get the first workers / get reviewed
+    # first when a backlog can't fully clear within the task time limit.
+    prs = prioritize_prs(prs)
+    if PRIORITY_AUTHORS:
+        n_prio = sum(1 for p in prs if (p.author or "").lower() in PRIORITY_AUTHORS)
+        if n_prio:
+            logging.info("Prioritizing %d PR(s) by author(s): %s",
+                         n_prio, ", ".join(sorted(PRIORITY_AUTHORS)))
 
     results: list[tuple[int, str]] = []
 

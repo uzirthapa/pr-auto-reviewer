@@ -532,6 +532,22 @@ memory / API at once. 1-10; 5 is a good default.
             cfg["review_concurrency"] = 5
             break
 
+    print("""
+Optionally prioritize specific authors: their PRs are reviewed first each
+cycle (handy when a backlog can't fully clear in time). Comma-separated
+GitHub logins, or blank for none.
+""".rstrip())
+    pa_default = ", ".join(existing.get("priority_authors") or [])
+    pa_raw = _ask(
+        "Priority authors (comma-separated logins, blank = none)",
+        default=pa_default, non_interactive=non_interactive,
+    ).strip()
+    authors = [a.strip() for a in pa_raw.split(",") if a.strip()]
+    if authors:
+        cfg["priority_authors"] = authors
+    elif "priority_authors" in cfg:
+        cfg.pop("priority_authors")
+
     _print_header("4) Tell the reviewer about your codebase")
     print("""
 This one sentence is injected into the reviewer prompt so the model has
