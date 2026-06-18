@@ -30,7 +30,7 @@ DEFAULT_RECIPIENT = os.environ.get(
     "REPORT_RECIPIENT",
     _user_config.get("report_recipient", "uzirthapa@microsoft.com"),
 )
-SEND_TIMEOUT = int(os.environ.get("REPORT_TIMEOUT", "120"))
+SEND_TIMEOUT = int(os.environ.get("REPORT_TIMEOUT", "180"))
 
 
 def setup_logging(verbose: bool) -> None:
@@ -58,13 +58,40 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $html = Get-Content -LiteralPath $HtmlPath -Raw -Encoding UTF8
+
+# Outlook COM Send() only QUEUES the mail to the Outbox; it does not
+# transmit. If outlook.exe isn't already running with its send/receive
+# scheduler (e.g. the scheduled task fires right after the machine wakes,
+# before the user has opened Outlook), the mail sits in the Outbox and is
+# never delivered -- yet Send() returns success. So: make sure Outlook is
+# actually running, send, force a send/receive, and verify the Outbox
+# drains before reporting SENT.
+if (-not (Get-Process -Name OUTLOOK -ErrorAction SilentlyContinue)) {
+    Start-Process "outlook.exe" | Out-Null
+    Start-Sleep -Seconds 30   # let the profile load and connect
+}
+
 $outlook = New-Object -ComObject Outlook.Application
+$ns      = $outlook.GetNamespace("MAPI")
 $mail    = $outlook.CreateItem(0)   # 0 = MailItem
 $mail.To       = $To
 $mail.Subject  = $Subject
 $mail.BodyFormat = 2                # 2 = olFormatHTML
 $mail.HTMLBody = $html
 $mail.Send()
+
+# Force transmission and wait for the Outbox to actually drain so we never
+# report a false success on mail that's merely queued.
+$outbox = $ns.GetDefaultFolder(4)   # 4 = olFolderOutbox
+$deadline = (Get-Date).AddSeconds(60)
+do {
+    try { $ns.SendAndReceive($false) } catch {}
+    Start-Sleep -Seconds 4
+} while ($outbox.Items.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+if ($outbox.Items.Count -gt 0) {
+    throw "Mail still in Outbox after send/receive -- not delivered (Outlook offline?)."
+}
 Write-Output "SENT"
 '''
 
