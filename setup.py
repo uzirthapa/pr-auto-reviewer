@@ -454,7 +454,27 @@ def collect_config(existing: dict[str, Any], *, non_interactive: bool) -> dict[s
     viewer = _gh_viewer_login(host)
     if viewer:
         print(f"  Detected reviewer login on {host}: {viewer}")
-        print("  (PRs are picked up via `review-requested:@me` — no need to configure.)")
+
+    print("""
+Whose PRs should be auto-reviewed? Enter the GitHub logins of the authors
+whose open PRs this tool should review (comma-separated). The tool reviews
+every open, non-draft PR opened by these authors — it no longer keys off
+who you're requested to review.
+""".rstrip())
+    ra_default = ", ".join(existing.get("review_authors") or ([viewer] if viewer else []))
+    while True:
+        ra_raw = _ask(
+            "Authors to review (comma-separated logins)",
+            default=ra_default, required=True, non_interactive=non_interactive,
+        ).strip()
+        review_authors = [a.strip() for a in ra_raw.split(",") if a.strip()]
+        if review_authors:
+            cfg["review_authors"] = review_authors
+            break
+        print("  At least one author login is required.")
+        if non_interactive:
+            cfg["review_authors"] = [viewer] if viewer else []
+            break
 
     _print_header("2) Daily summary email")
     if viewer:

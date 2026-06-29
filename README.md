@@ -1,8 +1,8 @@
 # Agentic Automations Auto-Review
 
 Python tooling that auto-reviews open PRs on a GitHub (or GitHub Enterprise)
-repo **where the authenticated user is a requested reviewer** (i.e., the
-same PRs you'd see in your "Awaiting your review" list). Python handles
+repo **opened by a configured set of authors** (`review_authors` in
+`config.json`). Python handles
 all GitHub I/O via `gh`; the only thing handed to `copilot` is the
 reasoning task, with a strict JSON contract.
 
@@ -270,7 +270,9 @@ Auto-Reviewer setup
 GitHub host (e.g. github.com, or your enterprise GHE host) [microsoft.ghe.com]: >
 Repository to review (owner/name): > finance/invoice-service
   Detected reviewer login on microsoft.ghe.com: jdoe
-  (PRs are picked up via `review-requested:@me` — no need to configure.)
+
+Whose PRs should be auto-reviewed? ...
+Authors to review (comma-separated logins) [jdoe]: > jdoe, ateammate
 
 ------------------------------
   2) Daily summary email

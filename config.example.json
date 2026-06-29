@@ -1,6 +1,7 @@
 {
   "gh_host": "microsoft.ghe.com",
   "repo": "your-org/your-repo",
+  "review_authors": ["a-teammate-login", "another-teammate-login"],
   "report_recipient": "you@yourcompany.com",
   "report_time": "07:00",
   "review_model": "claude-opus-4.8",

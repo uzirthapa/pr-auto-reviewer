@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
+import config as _user_config
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 METRICS = SCRIPT_DIR / "reviews" / "metrics.jsonl"
 REVIEWS_DIR = SCRIPT_DIR / "reviews"
@@ -94,11 +96,45 @@ def _format_kinds(events: list[dict]) -> str:
     return " + ".join(parts) or "?"
 
 
+def _migration_banner_html() -> str:
+    """Prominent action-required banner shown when `review_authors` is not
+    configured. Existing installs that predate the author-based model run
+    the 5-min task silently and now review NOTHING until an author list is
+    set — most users never see the log warning, so we surface it here in
+    the one channel that lands in their inbox.
+
+    Returns an empty string once `review_authors` is configured.
+    """
+    env = os.environ.get("COPILOT_REVIEW_AUTHORS")
+    configured = [a.strip() for a in env.split(",")] if env is not None \
+        else (_user_config.get("review_authors") or [])
+    if any(str(a).strip() for a in configured):
+        return ""
+    return """
+<div style="border:2px solid #cf222e;border-radius:6px;background:#ffebe9;
+            padding:12px 16px;margin:0 0 18px 0;color:#1f2328;">
+  <div style="font-weight:700;color:#cf222e;font-size:15px;margin-bottom:4px;">
+    ⚠️ Action required — no one's PRs are being reviewed
+  </div>
+  <div style="font-size:14px;line-height:1.45;">
+    This auto-reviewer now reviews PRs by a configured list of authors
+    instead of whoever you're requested to review. You haven't set that
+    list yet, so <strong>nothing is being reviewed</strong>.
+    Set whose PRs to review by re-running
+    <code>python setup.py</code> (or add a <code>review_authors</code>
+    array to <code>config.json</code> / set the
+    <code>COPILOT_REVIEW_AUTHORS</code> env var).
+  </div>
+</div>"""
+
+
 def render_html(records: list[dict], hours: int) -> str:
     now_local = datetime.now().strftime("%a %b %d %Y %H:%M %Z").strip()
+    banner = _migration_banner_html()
     if not records:
         return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;">
 <h2>🤖 Agentic-Automations Auto-Review — daily report</h2>
+{banner}
 <p>Window: last {hours}h (as of {escape(now_local)}).</p>
 <p><em>No reviews in this window.</em></p>
 </body></html>"""
@@ -217,6 +253,7 @@ def render_html(records: list[dict], hours: int) -> str:
 
     return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#1f2328;max-width:980px;">
 <h2 style="margin-bottom:4px;">🤖 Agentic-Automations Auto-Review — daily report</h2>
+{banner}
 <p style="color:#57606a;margin-top:0;">Window: last {hours}h (as of {escape(now_local)}).</p>
 
 <table style="border-collapse:collapse;margin:12px 0 18px 0;">

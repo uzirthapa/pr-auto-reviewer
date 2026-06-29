@@ -7,6 +7,11 @@ defaults so a fresh checkout without config still imports cleanly.
 Schema (all optional):
   gh_host                 GitHub host, e.g. "microsoft.ghe.com" or "github.com"
   repo                    "owner/name" of the repo to review
+  review_authors          list[str] of GitHub logins whose open PRs are
+                          reviewed. Replaces the old review-requested:@me
+                          model. Overridden by the COPILOT_REVIEW_AUTHORS
+                          env var (comma-separated). Empty/missing means
+                          nothing is reviewed.
   report_recipient        email address for the daily summary
   report_time             "HH:MM" 24h local time to send the daily report
   review_model            Copilot model id for reviews (e.g.

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Auto-review PRs in microsoft.ghe.com/bic/agentic-automations where the
-authenticated user is a requested reviewer.
+Auto-review PRs in microsoft.ghe.com/bic/agentic-automations opened by a
+configured set of authors (`review_authors` in config.json).
 
 Pipeline (per cycle, every ~20 min):
   1. Python lists open, non-draft PRs returned by
-       `gh pr list --search "is:pr is:open review-requested:@me"`.
+       `gh pr list --search "is:pr is:open author:<login>"` for each
+       configured review author (unioned).
   2. For each PR the script consults state.json to decide one of:
        - skip       : already reviewed at this HEAD SHA, no new author
                       activity on a blocking review.
@@ -146,6 +147,32 @@ def _priority_authors() -> set[str]:
 PRIORITY_AUTHORS = _priority_authors()
 
 
+# Authors whose open PRs we review. This REPLACES the old
+# `review-requested:@me` model: instead of waiting to be added as a
+# requested reviewer, we proactively review PRs opened by these logins.
+# Precedence: COPILOT_REVIEW_AUTHORS env (comma-separated) > config.json
+# "review_authors" (list) > none. An empty set means nothing is reviewed
+# (the tool no longer falls back to "anything requested of me").
+def _review_authors() -> list[str]:
+    raw = os.environ.get("COPILOT_REVIEW_AUTHORS")
+    if raw is not None:
+        items = [a.strip() for a in raw.split(",")]
+    else:
+        items = _user_config.get("review_authors") or []
+    # De-dupe case-insensitively while preserving first-seen order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in items:
+        login = str(a).strip()
+        if login and login.lower() not in seen:
+            seen.add(login.lower())
+            out.append(login)
+    return out
+
+
+REVIEW_AUTHORS = _review_authors()
+
+
 def prioritize_prs(prs: list[PullRequest]) -> list[PullRequest]:
     """Order PRs so prioritized authors come first, each group otherwise
     keeping ascending-number order for determinism."""
@@ -276,16 +303,26 @@ class PullRequest:
 
 
 def list_open_prs(repo: str) -> list[PullRequest]:
-    """List open, non-draft PRs we should look at:
+    """List open, non-draft PRs opened by the configured `review_authors`.
 
-      - `review-requested:@me` — new PRs and explicit re-requests, AND
-      - `reviewed-by:@me` — PRs we already reviewed. GitHub drops us from
-        the requested set the moment we submit a review, so without this
-        second search we'd never notice an author pushing NEW commits
-        after our review. These come back flagged review_requested=False;
-        reconsider_pr only re-runs them when their HEAD has actually moved
-        (see its cheap no-new-code gate), so the sweep stays inexpensive.
+    We no longer key off `review-requested:@me`. Instead we proactively
+    pull every open PR authored by a login in REVIEW_AUTHORS (one
+    `author:<login>` search per author, unioned). Because an author
+    search always surfaces the PR regardless of our review state, this
+    also covers authors pushing new commits AFTER we reviewed — no
+    separate `reviewed-by:@me` sweep is needed.
+
+    With no authors configured, there's nothing in scope and we return an
+    empty list.
     """
+    if not REVIEW_AUTHORS:
+        logging.warning(
+            "No review_authors configured — nothing to review. Set "
+            "`review_authors` in config.json (or COPILOT_REVIEW_AUTHORS) "
+            "to choose whose PRs to review."
+        )
+        return []
+
     fields = "number,title,author,headRefOid,baseRefName,headRefName,isDraft,body,url,updatedAt"
 
     def _search(query: str) -> list[dict[str, Any]]:
@@ -297,30 +334,27 @@ def list_open_prs(repo: str) -> list[PullRequest]:
             logging.error("Failed to parse PR list for query: %s", query)
             return []
 
-    requested = _search("is:pr is:open review-requested:@me")
-    reviewed = _search("is:pr is:open reviewed-by:@me")
-    requested_nums = {p["number"] for p in requested}
-
     by_num: dict[int, PullRequest] = {}
-    for p in requested + reviewed:
-        if p.get("isDraft"):
-            continue
-        num = p["number"]
-        if num in by_num:
-            continue
-        by_num[num] = PullRequest(
-            number=num,
-            title=p.get("title", ""),
-            author=(p.get("author") or {}).get("login", "?"),
-            head_sha=p.get("headRefOid", ""),
-            base_ref=p.get("baseRefName", ""),
-            head_ref=p.get("headRefName", ""),
-            is_draft=bool(p.get("isDraft")),
-            body=p.get("body") or "",
-            url=p.get("url", ""),
-            updated_at=p.get("updatedAt", ""),
-            review_requested=(num in requested_nums),
-        )
+    for login in REVIEW_AUTHORS:
+        for p in _search(f"is:pr is:open author:{login}"):
+            if p.get("isDraft"):
+                continue
+            num = p["number"]
+            if num in by_num:
+                continue
+            by_num[num] = PullRequest(
+                number=num,
+                title=p.get("title", ""),
+                author=(p.get("author") or {}).get("login", "?"),
+                head_sha=p.get("headRefOid", ""),
+                base_ref=p.get("baseRefName", ""),
+                head_ref=p.get("headRefName", ""),
+                is_draft=bool(p.get("isDraft")),
+                body=p.get("body") or "",
+                url=p.get("url", ""),
+                updated_at=p.get("updatedAt", ""),
+                review_requested=True,
+            )
     prs = sorted(by_num.values(), key=lambda x: x.number)
     return prs
 
@@ -1841,14 +1875,6 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
 
     head_changed = pr.head_sha != prev.get("head_sha")
 
-    # Cheap gate for the `reviewed-by:@me` sweep: a PR we already reviewed
-    # but are NO LONGER requested on only warrants another look when NEW
-    # CODE has landed (HEAD moved). If HEAD is unchanged, skip before the
-    # expensive activity fetch — we don't chase replies on PRs we're not
-    # assigned to. (Requested PRs still get the full activity-based path.)
-    if not forced and not pr.review_requested and not head_changed:
-        return "skip-reviewed-no-new-code"
-
     activity = fetch_pr_activity_since(repo, pr.number, last_action_iso)
     prior_decision = (prev.get("decision") or "").lower()
     code_changed = head_changed or bool(activity.get("new_commits"))
@@ -1960,12 +1986,8 @@ def review_pr(repo: str, pr: PullRequest, state: dict[str, Any],
     prev = state.get(key) or {}
 
     if not prev:
-        # Never reviewed by this tool. Only do a fresh review if we're an
-        # actual requested reviewer. A PR surfaced solely via
-        # `reviewed-by:@me` with no state means we reviewed it outside
-        # this tool — don't barge in with a fresh automated review.
-        if not pr.review_requested:
-            return "skip-reviewed-elsewhere-no-state"
+        # Never reviewed by this tool. Every PR in the list is by a
+        # configured review author, so do a fresh review.
         return _do_fresh_review(repo, pr, state, dry_run)
 
     # We have prior state. Reconsider handles all triggers (head changed,
@@ -2016,7 +2038,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="Re-review even if HEAD SHA hasn't changed.")
     ap.add_argument("--only-pr", type=int, default=None,
-                    help="Only review this PR number (must still be one I am a requested reviewer on).")
+                    help="Only review this PR number (must still be by a configured review author).")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -2036,13 +2058,13 @@ def main() -> int:
     except Exception as e:
         logging.error("Failed to list PRs: %s", e)
         return 2
-    logging.info("Found %d open non-draft PR(s) requested-of or already-reviewed-by %s",
-                 len(prs), me)
+    logging.info("Found %d open non-draft PR(s) by configured review_authors",
+                 len(prs))
 
     if args.only_pr is not None:
         prs = [p for p in prs if p.number == args.only_pr]
         if not prs:
-            logging.warning("PR #%s not in the open requested-of / reviewed-by set",
+            logging.warning("PR #%s not in the open review_authors set",
                             args.only_pr)
 
     # Cheap-polling short-circuit: if nothing in the PR list has changed

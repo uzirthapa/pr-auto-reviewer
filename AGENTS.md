@@ -5,7 +5,8 @@ Guidance for AI coding agents working in this repo. Read this first.
 ## What this repo is
 
 A Python + Windows-Task-Scheduler harness that auto-reviews open PRs on a
-GitHub (or GHE) repo where the authenticated user is a requested reviewer.
+GitHub (or GHE) repo, scoped to PRs opened by a configured set of authors
+(`review_authors`).
 Originally targeted `microsoft.ghe.com/bic/agentic-automations`; now
 configurable per-install via `config.json`.
 
@@ -30,18 +31,16 @@ list_open_prs  ──►  fingerprint short-circuit  ──►  per-PR loop
 ```
 
 Per-cycle flow (every 5 min via Scheduled Task):
-1. `gh pr list ... review-requested:@me` **unioned with**
-   `reviewed-by:@me` → `PullRequest` list (each tagged `review_requested`).
-   The `reviewed-by` arm catches authors pushing new commits AFTER we
-   reviewed — GitHub removes us from the requested set once we submit a
-   review, so without it we'd stop tracking the PR.
+1. For each login in `review_authors`, `gh pr list ... author:<login>`,
+   unioned → `PullRequest` list. An author search always surfaces the PR
+   regardless of our review state, so it also catches authors pushing new
+   commits AFTER we reviewed (no separate `reviewed-by:@me` sweep needed).
+   With no `review_authors` configured, nothing is in scope.
 2. SHA-256 fingerprint of `[(number, head_sha, updated_at), ...]`. If
    unchanged since last run and not `--force` / `--only-pr`, exit early
    without per-PR work.
 3. For each PR, `decide_action(state, pr)` returns one of:
-   - `skip` — already handled at this HEAD, no new author activity. A
-     `reviewed-by`-only PR (we're no longer requested) is skipped cheaply
-     BEFORE the activity fetch unless its HEAD moved (new code).
+   - `skip` — already handled at this HEAD, no new author activity.
    - `review` — never reviewed, or HEAD moved with prior non-block decision
    - `reconsider` — prior decision was a block, or author replied / pushed
      / re-requested us since our last action
@@ -173,7 +172,7 @@ python -c "import tempfile, json, setup, pathlib; setup.CONFIG_PATH = pathlib.Pa
 
 | Concern                        | Where                                                      |
 | ------------------------------ | ---------------------------------------------------------- |
-| PR listing (requested ∪ reviewed-by) + fingerprint | `list_open_prs`, `compute_prs_fingerprint` |
+| PR listing (author:<login> per review_author) + fingerprint | `list_open_prs`, `compute_prs_fingerprint` |
 | Decision routing               | `review_pr` (initial path) / `reconsider_pr` (any prior-state path) |
 | Initial prompt + rendering     | `REVIEW_INSTRUCTIONS_TEMPLATE`, `_render_review_instructions` |
 | Reconsider state machine prompt| `RECONSIDER_INSTRUCTIONS`                                   |
