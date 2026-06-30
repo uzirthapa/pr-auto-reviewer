@@ -11,8 +11,21 @@ reasoning task, with a strict JSON contract.
 > repo. See **Sharing this with your team** below.
 
 ## What it does each cycle
-For every open, non-draft PR that has me on the reviewers list, the script
-picks one of:
+PRs in scope are found by **author**, not by reviewer assignment: for each
+login in `review_authors` (in `config.json`), the script runs
+`gh pr list --search "is:pr is:open author:<login>"` and unions the
+results. An author search always surfaces the PR regardless of our review
+state, so it also catches authors who push new commits *after* we've
+reviewed. With no `review_authors` configured, nothing is in scope.
+
+Before doing any per-PR work, the script computes a SHA-256 **fingerprint**
+of `[(number, head_sha, updated_at), ...]` across the whole PR list. If it
+matches the previous run's fingerprint (stored as `__last_prs_fingerprint`
+in `state.json`) and you didn't pass `--force` / `--only-pr`, the cycle
+exits early without touching any PR — cheap polling for the common
+"nothing changed" case.
+
+For every open, non-draft PR in scope, the script picks one of:
 
 | state                                                          | action                                  |
 |----------------------------------------------------------------|-----------------------------------------|
@@ -21,6 +34,12 @@ picks one of:
 | HEAD SHA changed since prior action                            | **reconsider** with new diff             |
 | author replied / commented since prior action                  | **reconsider**                            |
 | someone re-requested me as a reviewer since prior action       | **reconsider**                            |
+
+Initial reviews are **binary** (`approve` / `request_changes`).
+Reconsiders are **3-state** (`approve` / `request_changes` / `comment`),
+where `comment` drops a prior block while deferring to the author (the
+script then dismisses our prior `CHANGES_REQUESTED` so branch protection
+clears).
 
 `state.json` records `head_sha`, decision, our review id, submission
 time, and per-reconsideration history. Reconsider applies regardless of
@@ -40,10 +59,18 @@ Copilot writes its answer to `review_output.json` in a sandbox directory
 much more robust than parsing stdout when the CLI prints progress chrome.
 
 ## Files
-- `auto_review.py` — main script
+- `auto_review.py` — main script (PR listing, review/reconsider logic,
+  GitHub I/O, state management)
+- `config.py` / `config.json` — per-install settings loader + (gitignored)
+  overrides; `config.example.json` is the documented template
+- `setup.py` — interactive setup wizard (writes `config.json`)
+- `daily_report.py` / `send_daily_report.py` — render + email the daily
+  summary
 - `register_scheduled_task.ps1` — registers a Windows Scheduled Task that
-  runs every 20 minutes
-- `state.json` — per-PR state (auto-managed)
+  runs every 5 minutes
+- `register_daily_report_task.ps1` — registers the Mon-Fri 07:00 report task
+- `install.ps1` — one-line bootstrap installer for teammates
+- `state.json` — per-PR state, incl. `__last_prs_fingerprint` (auto-managed)
 - `reviews/` — JSON artifacts of every review / reconsideration (full text)
 - `reviews/metrics.jsonl` — append-only lean ledger (one row per review)
   for impact reporting. Counts + pointers only; full issue text stays in
@@ -51,8 +78,9 @@ much more robust than parsing stdout when the CLI prints progress chrome.
 - `auto_review.log` — rolling log
 
 ## Prereqs
-- `gh` authenticated for `microsoft.ghe.com`
-  (`gh auth status --hostname microsoft.ghe.com`)
+- `gh` authenticated for your configured `gh_host`
+  (default `microsoft.ghe.com`; check with
+  `gh auth status --hostname <gh_host>`)
 - `copilot` CLI on PATH
 - Python 3.10+
 
@@ -68,7 +96,8 @@ Single PR, verbose:
 python auto_review.py --dry-run --only-pr 11372 --verbose
 ```
 
-Live (posts approve / request-changes / comment reviews via `gh pr review`):
+Live (posts approve / request-changes / comment reviews via the GitHub
+REST API — `gh api .../pulls/{n}/reviews`):
 ```
 python auto_review.py
 ```
@@ -78,7 +107,7 @@ Force re-review even if HEAD SHA is unchanged:
 python auto_review.py --dry-run --force
 ```
 
-## Scheduling (every 20 min)
+## Scheduling (every 5 min)
 From an elevated PowerShell:
 ```
 cd C:\Users\uzirthapa\CodeReviewAgentDesigner
