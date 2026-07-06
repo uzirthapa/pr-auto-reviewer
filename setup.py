@@ -439,7 +439,7 @@ def collect_config(existing: dict[str, Any], *, non_interactive: bool) -> dict[s
     _print_header("1) GitHub connection")
     host = _ask(
         "GitHub host (e.g. github.com, or your enterprise GHE host)",
-        default=existing.get("gh_host", "microsoft.ghe.com"),
+        default=existing.get("gh_host", "github.com"),
         required=True, non_interactive=non_interactive,
     )
     cfg["gh_host"] = host
@@ -477,10 +477,7 @@ who you're requested to review.
             break
 
     _print_header("2) Daily summary email")
-    if viewer:
-        rec_default = existing.get("report_recipient") or f"{viewer}@microsoft.com"
-    else:
-        rec_default = existing.get("report_recipient", "")
+    rec_default = existing.get("report_recipient", "")
     recipient = _ask(
         "Email to receive the daily summary (blank to skip)",
         default=rec_default, non_interactive=non_interactive,
@@ -509,9 +506,32 @@ who you're requested to review.
         if "report_time" in cfg:
             cfg.pop("report_time")
 
-    _print_header("3) Reviewer model")
+    _print_header("3) Reviewer engine & model")
     print("""
-Which Copilot model performs the reviews. Leave BLANK to automatically
+Which AI CLI performs the reviews. Presets:
+  copilot  - GitHub Copilot CLI (default)
+  agency   - Microsoft Agency wrapper around Copilot (unlimited sessions)
+  claude   - Anthropic Claude CLI
+For any other CLI, leave this as a preset and set `ai_command` / `ai_args`
+in config.json by hand (see config.example.json).
+""".rstrip())
+    valid_providers = ("copilot", "agency", "claude")
+    while True:
+        provider = _ask(
+            "AI provider (copilot / agency / claude)",
+            default=existing.get("ai_provider", "copilot"),
+            non_interactive=non_interactive,
+        ).strip().lower()
+        if provider in valid_providers:
+            cfg["ai_provider"] = provider
+            break
+        print(f"  '{provider}' is not one of: {', '.join(valid_providers)}.")
+        if non_interactive:
+            cfg["ai_provider"] = "copilot"
+            break
+
+    print("""
+Which model performs the reviews. Leave BLANK to automatically
 use the latest Opus model your Copilot CLI is set to (recommended — it
 stays current as new Opus versions ship, with long-context + high
 reasoning effort). Enter a specific id to pin one instead.
@@ -764,7 +784,7 @@ def main() -> int:
         print(f"\n✓ Wrote {CONFIG_PATH}")
         return 0
 
-    host_for_check = existing.get("gh_host", "microsoft.ghe.com")
+    host_for_check = existing.get("gh_host", "github.com")
     if not args.skip_prereqs:
         ok = run_prereq_checks(host_for_check)
         if not ok and not args.non_interactive:

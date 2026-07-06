@@ -18,6 +18,20 @@ Schema (all optional):
                           "claude-opus-4.8"). Omit to auto-use the latest
                           Opus the local Copilot CLI is set to. Overridden
                           by the COPILOT_REVIEW_MODEL env var.
+  ai_provider             which AI CLI runs the review. One of the built-in
+                          presets: "copilot" (default), "agency" (Microsoft
+                          Agency wrapper around Copilot), or "claude"
+                          (Anthropic Claude CLI). Overridden by the
+                          COPILOT_REVIEW_AI_PROVIDER env var.
+  ai_command              advanced: base command tokens for a fully custom
+                          AI CLI (string or list), e.g. ["mytool","run"].
+                          Overrides ai_provider. Env: COPILOT_REVIEW_AI_COMMAND.
+  ai_args                 advanced: argument template (list) for the custom
+                          CLI. Placeholders __MODEL__, __EFFORT__,
+                          __CONTEXT__, __DIR__, __PROMPT__ are substituted
+                          at call time. The CLI must write its JSON answer
+                          to review_output.json in __DIR__, or print it to
+                          stdout.
   review_concurrency      how many PRs to review in parallel (int, 1-10,
                           default 5). Overridden by the
                           COPILOT_REVIEW_CONCURRENCY env var.

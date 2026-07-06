@@ -8,17 +8,17 @@
 # Usage from a fresh PowerShell:
 #
 #   One-liner from the raw URL:
-#     iwr https://microsoft.ghe.com/raw/uzirthapa/agentic-automations-auto-review/main/install.ps1 -UseDefaultCredentials | iex
+#     iwr https://raw.githubusercontent.com/<owner>/<repo>/main/install.ps1 | iex
 #
 #   Or download + run with options:
-#     ./install.ps1                       # clone into .\agentic-automations-auto-review
+#     ./install.ps1                       # clone into .\pr-auto-reviewer
 #     ./install.ps1 -Dir C:\tools\reviewer
 #     ./install.ps1 -RepoUrl <fork url>   # if you've forked
 #     ./install.ps1 -NoSetup              # clone only, skip wizard
 
 param(
-    [string]$RepoUrl = "https://microsoft.ghe.com/uzirthapa/agentic-automations-auto-review.git",
-    [string]$Dir = (Join-Path (Get-Location) "agentic-automations-auto-review"),
+    [string]$RepoUrl = "https://github.com/<owner>/<repo>.git",
+    [string]$Dir = (Join-Path (Get-Location) "pr-auto-reviewer"),
     [switch]$NoSetup
 )
 

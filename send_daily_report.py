@@ -28,7 +28,7 @@ LOG_PATH = SCRIPT_DIR / "daily_report.log"
 
 DEFAULT_RECIPIENT = os.environ.get(
     "REPORT_RECIPIENT",
-    _user_config.get("report_recipient", "uzirthapa@microsoft.com"),
+    _user_config.get("report_recipient", ""),
 )
 SEND_TIMEOUT = int(os.environ.get("REPORT_TIMEOUT", "180"))
 

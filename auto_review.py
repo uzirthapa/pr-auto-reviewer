@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Auto-review PRs in microsoft.ghe.com/bic/agentic-automations opened by a
-configured set of authors (`review_authors` in config.json).
+Auto-review open PRs on a GitHub (or GitHub Enterprise) repo, scoped to a
+configured set of authors (`review_authors` in config.json). Point it at any
+repo/host via config.json or the --repo / --gh-host flags.
 
 Pipeline (per cycle, every ~20 min):
   1. Python lists open, non-draft PRs returned by
@@ -37,6 +38,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,8 +62,14 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # Per-install overrides come from config.json (written by setup.py).
 # Defaults preserve the original behavior so existing installs keep working.
-GH_HOST = _user_config.get("gh_host", "microsoft.ghe.com")
-DEFAULT_REPO = _user_config.get("repo", "bic/agentic-automations")
+GH_HOST = _user_config.get("gh_host", "github.com")
+DEFAULT_REPO = _user_config.get("repo", "")
+
+# The repo actually being reviewed this run. Defaults to the configured
+# repo but can be pointed at any "owner/name" via --repo. main() sets this
+# (and GH_HOST) from CLI args before any work happens; prompt text reads
+# ACTIVE_REPO so a run against another repo is labeled correctly.
+ACTIVE_REPO = DEFAULT_REPO
 
 # Cap on diff size sent to the model (characters). Very large PRs are
 # truncated so we still get an architecture-level review instead of
@@ -77,6 +85,31 @@ REVIEWS_DIR = SCRIPT_DIR / "reviews"
 # Append-only ledger: one JSON record per review/reconsider, for later
 # impact reporting ("how many issues caught, how many blocks, etc.").
 METRICS_PATH = REVIEWS_DIR / "metrics.jsonl"
+
+
+def _apply_runtime_context(repo: str, gh_host: str) -> None:
+    """Point this run at a specific repo/host.
+
+    Sets the active repo (used in prompt labels) and GitHub host (used by
+    `gh`). When `repo` differs from the configured default, state, logs and
+    review artifacts are isolated under `repos/<owner>__<name>/` so pointing
+    a one-off run at another repo can never corrupt the primary install's
+    `state.json` (PR numbers collide across repos). The configured/default
+    repo keeps using the legacy top-level paths unchanged.
+    """
+    global ACTIVE_REPO, GH_HOST
+    global STATE_PATH, LOG_PATH, REVIEWS_DIR, METRICS_PATH
+    ACTIVE_REPO = repo
+    if gh_host:
+        GH_HOST = gh_host
+    if repo and repo != DEFAULT_REPO:
+        slug = repo.replace("/", "__")
+        base = SCRIPT_DIR / "repos" / slug
+        base.mkdir(parents=True, exist_ok=True)
+        STATE_PATH = base / "state.json"
+        LOG_PATH = base / "auto_review.log"
+        REVIEWS_DIR = base / "reviews"
+        METRICS_PATH = REVIEWS_DIR / "metrics.jsonl"
 
 # Copilot model + reasoning effort. Architecture review is non-trivial.
 def _latest_opus_model() -> str:
@@ -112,6 +145,96 @@ COPILOT_CONTEXT = os.environ.get("COPILOT_REVIEW_CONTEXT", "long_context")
 
 # Hard wall-clock cap for the Copilot review call (seconds).
 COPILOT_TIMEOUT = int(os.environ.get("COPILOT_REVIEW_TIMEOUT", "900"))
+
+
+# ---------------------------------------------------------------------------
+# AI CLI selection (pluggable reviewer engine)
+# ---------------------------------------------------------------------------
+# The reasoning step is delegated to an external AI CLI. Which one is
+# configurable so users can pick GitHub Copilot, the Microsoft Agency
+# wrapper, the Anthropic Claude CLI, or any custom command. The chosen CLI
+# must either write its JSON answer to review_output.json (preferred) or
+# print it to stdout (fallback). Argument templates use __TOKEN__
+# placeholders substituted per call: __MODEL__, __EFFORT__, __CONTEXT__,
+# __DIR__ (the sandbox dir), __PROMPT__ (the short driving instruction).
+_COPILOT_STYLE_ARGS = [
+    "--model", "__MODEL__",
+    "--effort", "__EFFORT__",
+    "--context", "__CONTEXT__",
+    "--allow-all-tools",
+    "--add-dir", "__DIR__",
+    "--no-color",
+    "-p", "__PROMPT__",
+]
+
+AI_PRESETS: dict[str, dict[str, list[str]]] = {
+    # GitHub Copilot CLI — the original default.
+    "copilot": {"command": ["copilot"], "args": _COPILOT_STYLE_ARGS},
+    # Microsoft Agency wrapper around Copilot ("unlimited sessions"). It
+    # forwards everything after `--` straight to the Copilot CLI, so the
+    # exact same flags apply.
+    "agency": {"command": ["agency", "copilot", "--"], "args": _COPILOT_STYLE_ARGS},
+    # Anthropic Claude CLI. No --effort/--context; uses its own permission
+    # flag and reads/writes files in the added directory.
+    "claude": {
+        "command": ["claude"],
+        "args": [
+            "--model", "__MODEL__",
+            "--add-dir", "__DIR__",
+            "--dangerously-skip-permissions",
+            "-p", "__PROMPT__",
+        ],
+    },
+}
+
+
+def _as_token_list(value: Any) -> list[str] | None:
+    """Coerce a config value (string or list) into an argv token list."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        return shlex.split(value) if value else None
+    if isinstance(value, list):
+        toks = [str(v) for v in value]
+        return toks or None
+    return None
+
+
+def _resolve_ai_cli() -> tuple[list[str], list[str], str]:
+    """Resolve (base_command, args_template, display_name) for the AI CLI.
+
+    Precedence: an explicit ai_command / ai_args (env or config.json) fully
+    overrides; otherwise a named provider preset (default 'copilot'). This
+    keeps the original Copilot behavior byte-for-byte when nothing is set.
+    """
+    provider = (os.environ.get("COPILOT_REVIEW_AI_PROVIDER")
+                or _user_config.get("ai_provider")
+                or "copilot").strip().lower()
+
+    cmd_override = _as_token_list(
+        os.environ.get("COPILOT_REVIEW_AI_COMMAND")
+        or _user_config.get("ai_command")
+    )
+    args_override = _as_token_list(_user_config.get("ai_args"))
+
+    preset = AI_PRESETS.get(provider)
+    if preset is None and cmd_override is None:
+        logging.warning(
+            "Unknown ai_provider %r; falling back to 'copilot'. Valid "
+            "presets: %s (or set ai_command/ai_args for a custom CLI).",
+            provider, ", ".join(sorted(AI_PRESETS)),
+        )
+        preset = AI_PRESETS["copilot"]
+        provider = "copilot"
+
+    command = cmd_override or list(preset["command"])
+    args_template = args_override or list(preset["args"])
+    display = " ".join(command) if cmd_override is not None else provider
+    return command, args_template, display
+
+
+AI_COMMAND, AI_ARGS_TEMPLATE, AI_DISPLAY = _resolve_ai_cli()
 
 # How many PRs to review in parallel. Each review is a separate Copilot
 # subprocess (mostly I/O-bound waiting on the model), so running several
@@ -677,9 +800,7 @@ def _render_review_instructions() -> str:
     """
     codebase = _user_config.get(
         "codebase_description",
-        "a TypeScript / React / Node codebase "
-        "(microsoft.ghe.com/bic/agentic-automations -- the Copilot Studio "
-        "agentic automations product)",
+        "a software codebase",
     )
     focus_bullets = _format_bullets(_user_config.get("review_focus"))
     avoid_bullets = _format_bullets(_user_config.get("review_avoid"))
@@ -724,7 +845,7 @@ def build_review_prompt(pr: PullRequest) -> str:
     return (
         REVIEW_INSTRUCTIONS
         + "\n\n=== PULL REQUEST ===\n"
-        + f"Repo: {DEFAULT_REPO}\n"
+        + f"Repo: {ACTIVE_REPO}\n"
         + f"PR #{pr.number}: {pr.title}\n"
         + f"Author: {pr.author}\n"
         + f"Branch: {pr.head_ref} -> {pr.base_ref}\n"
@@ -1489,7 +1610,7 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
     parts: list[str] = [
         RECONSIDER_INSTRUCTIONS,
         "\n\n=== PULL REQUEST ===\n",
-        f"Repo: {DEFAULT_REPO}\n",
+        f"Repo: {ACTIVE_REPO}\n",
         f"PR #{pr.number}: {pr.title}\n",
         f"Author: {pr.author}\n",
         f"Branch: {pr.head_ref} -> {pr.base_ref}\n",
@@ -1657,9 +1778,9 @@ def prune_copilot_artifacts() -> None:
 
 def run_copilot_review_call(prompt: str,
                             validator=_validate_review) -> dict[str, Any]:
-    """Invoke copilot; expect JSON in `review_output.json` in cwd."""
-    if not shutil.which("copilot"):
-        raise RuntimeError("`copilot` CLI not found on PATH")
+    """Invoke the configured AI CLI; expect JSON in `review_output.json`."""
+    if not shutil.which(AI_COMMAND[0]):
+        raise RuntimeError(f"`{AI_COMMAND[0]}` CLI not found on PATH")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="copilot_review_"))
     input_file = tmp_dir / "review_input.md"
@@ -1675,19 +1796,23 @@ def run_copilot_review_call(prompt: str,
 
     sessions_before = _snapshot_copilot_session_ids()
     try:
-        cmd = [
-            "copilot",
-            "--model", COPILOT_MODEL,
-            "--effort", COPILOT_EFFORT,
-            "--context", COPILOT_CONTEXT,
-            "--allow-all-tools",
-            "--add-dir", str(tmp_dir),
-            "--no-color",
-            "-p", short_prompt,
-        ]
+        subs = {
+            "__MODEL__": COPILOT_MODEL,
+            "__EFFORT__": COPILOT_EFFORT,
+            "__CONTEXT__": COPILOT_CONTEXT,
+            "__DIR__": str(tmp_dir),
+            "__PROMPT__": short_prompt,
+        }
+
+        def _sub(token: str) -> str:
+            for k, v in subs.items():
+                token = token.replace(k, v)
+            return token
+
+        cmd = list(AI_COMMAND) + [_sub(a) for a in AI_ARGS_TEMPLATE]
         logging.info(
-            "Invoking copilot (model=%s, effort=%s, context=%s, prompt=%d chars on disk)",
-            COPILOT_MODEL, COPILOT_EFFORT, COPILOT_CONTEXT, len(prompt),
+            "Invoking AI CLI (%s, model=%s, effort=%s, context=%s, prompt=%d chars on disk)",
+            AI_DISPLAY, COPILOT_MODEL, COPILOT_EFFORT, COPILOT_CONTEXT, len(prompt),
         )
         t0 = time.time()
         res = subprocess.run(
@@ -1698,12 +1823,12 @@ def run_copilot_review_call(prompt: str,
         )
         dur = time.time() - t0
         logging.info(
-            "copilot returned in %.1fs rc=%d (stdout=%d chars, output_file=%s)",
-            dur, res.returncode, len(res.stdout or ""), output_file.exists(),
+            "AI CLI (%s) returned in %.1fs rc=%d (stdout=%d chars, output_file=%s)",
+            AI_DISPLAY, dur, res.returncode, len(res.stdout or ""), output_file.exists(),
         )
         if res.returncode != 0:
             raise RuntimeError(
-                f"copilot exited {res.returncode}: {res.stderr.strip()[:500]}"
+                f"{AI_DISPLAY} exited {res.returncode}: {res.stderr.strip()[:500]}"
             )
         # Primary path: read the file Copilot wrote.
         if output_file.exists():
@@ -2033,6 +2158,9 @@ def _do_fresh_review(repo: str, pr: PullRequest, state: dict[str, Any],
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", default=DEFAULT_REPO)
+    ap.add_argument("--gh-host", default=GH_HOST,
+                    help="GitHub host, e.g. github.com or your GHE host. "
+                         "Overrides config.json gh_host for this run.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Do not post to GitHub; just print and save artifacts.")
     ap.add_argument("--force", action="store_true",
@@ -2042,6 +2170,17 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    if not args.repo:
+        print(
+            "No repo configured. Set `repo` in config.json (run "
+            "`python setup.py`) or pass --repo owner/name.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Point paths/host/prompt labels at the requested repo before any work.
+    _apply_runtime_context(args.repo, args.gh_host)
+
     setup_logging(args.verbose)
     prune_copilot_artifacts()
     try:
@@ -2049,8 +2188,8 @@ def main() -> int:
     except Exception as e:
         logging.error("Could not resolve gh viewer login: %s", e)
         return 2
-    logging.info("auto_review starting: repo=%s viewer=%s dry_run=%s",
-                 args.repo, me, args.dry_run)
+    logging.info("auto_review starting: host=%s repo=%s viewer=%s dry_run=%s",
+                 GH_HOST, args.repo, me, args.dry_run)
 
     state = load_state()
     try:

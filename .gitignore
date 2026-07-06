@@ -5,6 +5,7 @@ daily_report.log
 rerun_comment_verdicts.log
 daily_report.html
 reviews/
+repos/
 full_dryrun.out
 
 # Per-installation config (use config.example.json as a template).

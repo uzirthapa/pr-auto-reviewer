@@ -1,4 +1,4 @@
-# Agentic Automations Auto-Review
+# PR Auto-Review
 
 Python tooling that auto-reviews open PRs on a GitHub (or GitHub Enterprise)
 repo **opened by a configured set of authors** (`review_authors` in
@@ -6,9 +6,13 @@ repo **opened by a configured set of authors** (`review_authors` in
 all GitHub I/O via `gh`; the only thing handed to `copilot` is the
 reasoning task, with a strict JSON contract.
 
-> Originally built for `microsoft.ghe.com/bic/agentic-automations`; now
-> configurable so any team can stand up their own instance against any
-> repo. See **Sharing this with your team** below.
+> Fully configurable — point it at any repo/host and tailor the reviewer
+> prompt to your codebase. See **Sharing this with your team** below.
+>
+> **Platform note:** the reviewer core (`auto_review.py`) is
+> cross-platform, but scheduling (`register_*.ps1`, Windows Task
+> Scheduler) and the daily email (Outlook COM) are **Windows-only**. On
+> other platforms, run `auto_review.py` from cron/systemd yourself.
 
 ## What it does each cycle
 PRs in scope are found by **author**, not by reviewer assignment: for each
@@ -79,7 +83,7 @@ much more robust than parsing stdout when the CLI prints progress chrome.
 
 ## Prereqs
 - `gh` authenticated for your configured `gh_host`
-  (default `microsoft.ghe.com`; check with
+  (default `github.com`; check with
   `gh auth status --hostname <gh_host>`)
 - `copilot` CLI on PATH
 - Python 3.10+
@@ -108,9 +112,9 @@ python auto_review.py --dry-run --force
 ```
 
 ## Scheduling (every 5 min)
-From an elevated PowerShell:
+From an elevated PowerShell, in the directory where you cloned this repo:
 ```
-cd C:\Users\uzirthapa\CodeReviewAgentDesigner
+cd <path-to-your-clone>
 .\register_scheduled_task.ps1            # dry-run schedule
 .\register_scheduled_task.ps1 -Live      # live schedule
 .\register_scheduled_task.ps1 -Unregister
@@ -122,7 +126,28 @@ The review model can be set three ways (highest precedence first):
 `setup.py`) → dynamic default (the latest Opus your Copilot CLI is set to,
 read from `~/.copilot/settings.json`, falling back to `claude-opus-4.8`).
 
+### Choosing the AI CLI
+Which AI CLI runs the review is configurable via `ai_provider` in
+`config.json` (or the `COPILOT_REVIEW_AI_PROVIDER` env var). Built-in
+presets:
+
+| `ai_provider` | Launches                                                  |
+| ------------- | --------------------------------------------------------- |
+| `copilot`     | GitHub Copilot CLI (`copilot …`) — **default**            |
+| `agency`      | Microsoft Agency wrapper (`agency copilot -- …`)          |
+| `claude`      | Anthropic Claude CLI (`claude …`)                         |
+
+For any other CLI, set a fully custom command in `config.json`:
+```json
+"ai_command": ["mytool", "run"],
+"ai_args": ["--model", "__MODEL__", "--add-dir", "__DIR__", "-p", "__PROMPT__"]
+```
+The `__MODEL__`, `__EFFORT__`, `__CONTEXT__`, `__DIR__`, `__PROMPT__`
+placeholders are substituted per call. The CLI must write its JSON answer
+to `review_output.json` inside `__DIR__`, or print it to stdout.
+
 Environment variables:
+- `COPILOT_REVIEW_AI_PROVIDER` (default `copilot`; also `ai_provider` in `config.json`)
 - `COPILOT_REVIEW_MODEL` (default: latest Opus, auto-resolved)
 - `COPILOT_REVIEW_EFFORT` (default `high`)
 - `COPILOT_REVIEW_CONTEXT` (default `long_context`)
@@ -157,7 +182,7 @@ on a Saturday or Sunday no-ops with a log line. Pass `--include-weekends` to
 override. `--dry-run` always renders regardless of day.
 
 Environment variables:
-- `REPORT_RECIPIENT` (default `uzirthapa@microsoft.com`)
+- `REPORT_RECIPIENT` (default: `report_recipient` from `config.json`)
 - `REPORT_HOURS` window in hours (default `24`)
 
 Logs go to `daily_report.log`. Source data is `reviews/metrics.jsonl`
@@ -173,7 +198,7 @@ is shared at runtime.
 
 ### Granting your team access (without adding people one by one)
 
-On Microsoft GHE you have three good options:
+On GitHub / GitHub Enterprise you have three good options:
 
 | # | How                                                       | One-time setup                                                                                  | What teammates do          |
 | - | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | -------------------------- |
@@ -183,7 +208,7 @@ On Microsoft GHE you have three good options:
 
 To find your team slug:
 ```pwsh
-$env:GH_HOST="microsoft.ghe.com"
+$env:GH_HOST="github.com"
 gh api orgs/<org>/teams --paginate --jq '.[] | "\(.slug)  -- \(.name)"' | findstr /i "<keyword>"
 ```
 
@@ -196,13 +221,13 @@ Once they have read access, the entire onboarding is a single line. Send
 them this (substitute your repo's raw URL):
 
 ```pwsh
-iwr https://microsoft.ghe.com/raw/<owner>/<repo>/main/install.ps1 -UseDefaultCredentials | iex
+iwr https://raw.githubusercontent.com/<owner>/<repo>/main/install.ps1 | iex
 ```
 
 Or, if they prefer to inspect it first:
 
 ```pwsh
-git clone https://microsoft.ghe.com/<owner>/<repo>.git
+git clone https://github.com/<owner>/<repo>.git
 cd <repo>
 .\install.ps1
 ```
@@ -211,7 +236,7 @@ cd <repo>
 exact `winget` commands for anything missing), clones the repo, then
 hands off to `python setup.py` for the interactive wizard. Flags:
 
-- `-Dir C:\path`     — where to clone (default: `.\agentic-automations-auto-review`)
+- `-Dir C:\path`     — where to clone (default: `.\pr-auto-reviewer`)
 - `-RepoUrl <url>`   — clone from a fork instead
 - `-NoSetup`         — clone only; they can run the wizard later
 
@@ -256,7 +281,7 @@ setup — Copilot expands shorthand for you).
 Install in one line (needs git, gh, copilot, python; PowerShell will
 warn you if any are missing):
 
-    iwr https://microsoft.ghe.com/raw/<owner>/<repo>/main/install.ps1 -UseDefaultCredentials | iex
+    iwr https://raw.githubusercontent.com/<owner>/<repo>/main/install.ps1 | iex
 
 It'll walk you through the wizard. Start with --dry-run for a day or
 two to make sure the reviews look right for your repo, then flip to
@@ -291,14 +316,14 @@ Auto-Reviewer setup
   + Python         found at C:\Python312\python.exe
   + GitHub CLI     found at C:\Program Files\GitHub CLI\gh.exe
   + Copilot CLI    found at C:\Users\jdoe\AppData\Local\GitHubCopilotCli\copilot.exe
-  + gh auth status (microsoft.ghe.com): Logged in to microsoft.ghe.com as jdoe
+  + gh auth status (github.com): Logged in to github.com as jdoe
 
 ----------------------------
   1) GitHub connection
 ----------------------------
-GitHub host (e.g. github.com, or your enterprise GHE host) [microsoft.ghe.com]: >
+GitHub host (e.g. github.com, or your enterprise GHE host) [github.com]: >
 Repository to review (owner/name): > finance/invoice-service
-  Detected reviewer login on microsoft.ghe.com: jdoe
+  Detected reviewer login on github.com: jdoe
 
 Whose PRs should be auto-reviewed? ...
 Authors to review (comma-separated logins) [jdoe]: > jdoe, ateammate
@@ -306,7 +331,7 @@ Authors to review (comma-separated logins) [jdoe]: > jdoe, ateammate
 ------------------------------
   2) Daily summary email
 ------------------------------
-Email to receive the daily 07:00 summary (blank to skip) [jdoe@microsoft.com]: >
+Email to receive the daily 07:00 summary (blank to skip) [jdoe@example.com]: >
 
 --------------------------------------------
   3) Tell the reviewer about your codebase
@@ -432,9 +457,9 @@ The resulting `config.json` looks like:
 
 ```json
 {
-  "gh_host": "microsoft.ghe.com",
+  "gh_host": "github.com",
   "repo": "finance/invoice-service",
-  "report_recipient": "jdoe@microsoft.com",
+  "report_recipient": "jdoe@example.com",
   "codebase_description": "a Python Django monorepo handling B2B invoice ingestion, OCR, and AP automation",
   "review_focus": [
     "Flag inefficient Django patterns on invoice workflows: unbounded QuerySets without `.iterator()` on large invoice exports, missing `select_related`/`prefetch_related` on related models, repeated DRF serializer instantiation in loops, and OCR/PDF parsing done synchronously inside request handlers instead of via Celery.",
@@ -495,4 +520,8 @@ walks through dry-run validation and scheduling.
 | `register_scheduled_task.ps1`, `register_daily_report_task.ps1` | `state.json`                            |
 | `config.example.json`                                   | `auto_review.log`, `daily_report.log`   |
 | `.copilot/skills/setup-auto-reviewer/SKILL.md`          | `reviews/` (artifacts + `metrics.jsonl`) |
-| `README.md`, `.gitignore`                               |                                          |
+| `README.md`, `.gitignore`, `LICENSE`                    |                                          |
+
+## License
+
+[MIT](LICENSE) © 2026 Uzir Thapa
