@@ -14,6 +14,11 @@ Schema (all optional):
                           nothing is reviewed.
   report_recipient        email address for the daily summary
   report_time             "HH:MM" 24h local time to send the daily report
+  monday_lookback_hours   int hours the Monday report looks back, to cover
+                          the weekend (report only runs Mon-Fri). Default 24
+                          (no weekend coverage); set 72 to include Sat/Sun.
+                          Other weekdays always use 24h. Overridden by an
+                          explicit --hours flag or the REPORT_HOURS env var.
   review_model            Copilot model id for reviews (e.g.
                           "claude-opus-4.8"). Omit to auto-use the latest
                           Opus the local Copilot CLI is set to. Overridden

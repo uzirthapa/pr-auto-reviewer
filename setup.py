@@ -500,11 +500,27 @@ who you're requested to review.
                 # Don't loop forever in headless mode — fall back to default.
                 cfg["report_time"] = "07:00"
                 break
+        mlh_default = str(existing.get("monday_lookback_hours", 72))
+        while True:
+            mlh = _ask(
+                "Monday report lookback in hours (widens to cover the weekend; "
+                "other weekdays always use 24)",
+                default=mlh_default, non_interactive=non_interactive,
+            ).strip()
+            if mlh.isdigit() and int(mlh) > 0:
+                cfg["monday_lookback_hours"] = int(mlh)
+                break
+            print(f"  '{mlh}' is not a positive whole number of hours.")
+            if non_interactive:
+                cfg["monday_lookback_hours"] = 72
+                break
     else:
         if "report_recipient" in cfg:
             cfg.pop("report_recipient")
         if "report_time" in cfg:
             cfg.pop("report_time")
+        if "monday_lookback_hours" in cfg:
+            cfg.pop("monday_lookback_hours")
 
     _print_header("3) Reviewer engine & model")
     print("""

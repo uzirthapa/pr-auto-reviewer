@@ -4,6 +4,7 @@
   "review_authors": ["a-teammate-login", "another-teammate-login"],
   "report_recipient": "you@yourcompany.com",
   "report_time": "07:00",
+  "monday_lookback_hours": 72,
   "review_model": "claude-opus-4.8",
   "ai_provider": "copilot",
   "review_concurrency": 5,

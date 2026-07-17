@@ -32,6 +32,30 @@ DEFAULT_RECIPIENT = os.environ.get(
 )
 SEND_TIMEOUT = int(os.environ.get("REPORT_TIMEOUT", "180"))
 
+# The report only runs Mon-Fri, so weekend review activity would never appear
+# unless Monday widens its window to reach back over Sat/Sun. Safe default 24
+# reproduces the original single-day window when unconfigured; this install
+# sets monday_lookback_hours=72 in config.json.
+DEFAULT_LOOKBACK_HOURS = 24
+MONDAY_LOOKBACK_HOURS = int(
+    _user_config.get("monday_lookback_hours", DEFAULT_LOOKBACK_HOURS)
+)
+
+
+def resolve_lookback_hours(cli_hours: int | None) -> int:
+    """Pick the report window in hours. An explicit --hours or REPORT_HOURS
+    always wins (ops override); otherwise Monday widens to
+    MONDAY_LOOKBACK_HOURS to cover the weekend and every other weekday uses
+    DEFAULT_LOOKBACK_HOURS."""
+    if cli_hours is not None:
+        return cli_hours
+    env = os.environ.get("REPORT_HOURS")
+    if env:
+        return int(env)
+    if datetime.now().weekday() == 0:  # Monday
+        return MONDAY_LOOKBACK_HOURS
+    return DEFAULT_LOOKBACK_HOURS
+
 
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
@@ -132,8 +156,10 @@ def send_via_outlook(html: str, recipient: str, subject: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--hours", type=int, default=int(os.environ.get("REPORT_HOURS", "24")),
-                    help="Lookback window in hours (default 24).")
+    ap.add_argument("--hours", type=int, default=None,
+                    help="Lookback window in hours. Default 24, or "
+                         "monday_lookback_hours on Mondays to cover the "
+                         "weekend. Override with --hours or REPORT_HOURS.")
     ap.add_argument("--recipient", default=DEFAULT_RECIPIENT)
     ap.add_argument("--dry-run", action="store_true",
                     help="Render the report and write it to a local file; do not email.")
@@ -147,10 +173,11 @@ def main() -> int:
 
     setup_logging(args.verbose)
 
-    records = load_records(args.hours)
-    html = render_html(records, args.hours)
-    logging.info("Rendered report: %d records in window, %d bytes of HTML",
-                 len(records), len(html))
+    hours = resolve_lookback_hours(args.hours)
+    records = load_records(hours)
+    html = render_html(records, hours)
+    logging.info("Rendered report: %d records in window (%dh), %d bytes of HTML",
+                 len(records), hours, len(html))
 
     if args.dry_run:
         out_path = Path(args.output) if args.output else SCRIPT_DIR / "daily_report.html"
