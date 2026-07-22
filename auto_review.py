@@ -386,6 +386,24 @@ def _gh_env() -> dict[str, str]:
     return env
 
 
+def _ai_env() -> dict[str, str]:
+    """Environment for the (Node-based) AI CLI subprocess that suppresses the
+    background version/update checks which reach the PUBLIC npm registry
+    (registry.npmjs.org). This org's Defender Network Protection blocks that
+    host, so each check raised a recurring "blocked by your IT admin" toast
+    (this task runs every ~5 min). These flags keep the CLI on the internal
+    feed and quiet, so it never triggers the block."""
+    env = os.environ.copy()
+    env.update({
+        "NO_UPDATE_NOTIFIER": "1",
+        "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+        "NPM_CONFIG_FUND": "false",
+        "NPM_CONFIG_AUDIT": "false",
+        "ADBLOCK": "1",
+    })
+    return env
+
+
 def gh(args: list[str], *, check: bool = True, input_text: str | None = None,
        timeout: int = 120) -> subprocess.CompletedProcess[str]:
     cmd = ["gh", *args]
@@ -1820,6 +1838,7 @@ def run_copilot_review_call(prompt: str,
             timeout=COPILOT_TIMEOUT,
             encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW,
+            env=_ai_env(),
         )
         dur = time.time() - t0
         logging.info(
