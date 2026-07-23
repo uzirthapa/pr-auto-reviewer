@@ -2266,6 +2266,11 @@ def _record_initial_review(state: dict[str, Any], pr: PullRequest,
             "reviewed_at_iso": _iso_now(),
             "review_summary": review["summary"],
             "review_comments": review["comments"],
+            "needs_human_review": bool(review.get("needs_human_review")),
+            "manual_approval_pending": (
+                review.get("decision") == "approve" and not AUTO_APPROVE
+            ),
+            "core_functionality_change_pct": review.get("core_functionality_change_pct") or 0,
             "dry_run": dry_run,
             "reconsiders": [],
         }
@@ -2301,6 +2306,11 @@ def _record_reconsider(state: dict[str, Any], pr: PullRequest,
         # Effective current state moves forward.
         entry["decision"] = review["decision"]
         entry["head_sha"] = pr.head_sha
+        entry["needs_human_review"] = bool(review.get("needs_human_review"))
+        entry["manual_approval_pending"] = (
+            review.get("decision") == "approve" and not AUTO_APPROVE
+        )
+        entry["core_functionality_change_pct"] = review.get("core_functionality_change_pct") or 0
         state[str(pr.number)] = entry
 
 
