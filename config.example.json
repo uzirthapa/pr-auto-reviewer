@@ -9,6 +9,8 @@
   "ai_provider": "copilot",
   "review_concurrency": 5,
   "priority_authors": ["a-teammate-login"],
+  "_comment_npm_registry": "OPTIONAL upstream npm registry for the Node-based AI CLI. Microsoft-managed devices hard-block the public registries; packages must come through a CFS-protected feed. Leave empty to defer to the org-managed global ~/.npmrc (recommended). Set to https://packagefeedproxy.microsoft.io/npm/ if a machine's ambient config is missing and the CLI hard-fails.",
+  "npm_registry": "",
   "codebase_description": "a TypeScript / React / Node monorepo for <product name and what it does>",
   "review_focus": [
     "API contracts between the frontend and backend — flag any drift",
@@ -18,5 +20,12 @@
     "Storybook story formatting",
     "translation file ordering"
   ],
-  "reviewer_style": "Be direct and senior-engineer terse. Prefer one concrete fix over three vague suggestions. Never ask the author to 'consider' something without saying what and why."
+  "reviewer_style": "Be direct and senior-engineer terse. Prefer one concrete fix over three vague suggestions. Never ask the author to 'consider' something without saying what and why.",
+  "_comment_self_improve": "When true, at the end of each cycle the tool reads OTHER reviewers' comments on the in-scope PRs, asks the model for generalizable improvements to its own reviewer prompt, and appends them to learned_guidance below (and to the memory/ wiki). Off by default. Force a one-off run with `python auto_review.py --learn`.",
+  "self_improve": false,
+  "self_improve_min_interval_hours": 20,
+  "self_improve_max_new_items": 3,
+  "memory_dir": "memory",
+  "_comment_learned_guidance": "Managed by the tool's self-improvement step — you normally don't hand-edit this. Each item: {kind: focus|avoid, category, text, rationale, learned_at}. Injected into the review prompt on later cycles.",
+  "learned_guidance": []
 }

@@ -44,6 +44,15 @@ Schema (all optional):
                           reviewed first each cycle. Overridden by the
                           COPILOT_REVIEW_PRIORITY_AUTHORS env var
                           (comma-separated).
+  npm_registry            OPTIONAL upstream npm registry for the Node-based AI
+                          CLI subprocess. Microsoft-managed devices hard-block
+                          the public registries (registry.npmjs.org /
+                          yarnpkg.com / npmmirror.com); packages must come
+                          through a CFS-protected feed. Default "" defers to the
+                          org-managed global ~/.npmrc (recommended). Set to
+                          "https://packagefeedproxy.microsoft.io/npm/" (the CFS
+                          proxy) if a machine's ambient config is missing and
+                          the CLI hard-fails. Env: COPILOT_REVIEW_NPM_REGISTRY.
   codebase_description    one-sentence description of the codebase,
                           inlined into the reviewer prompt so the model
                           has context about the product/stack
@@ -53,6 +62,30 @@ Schema (all optional):
                           NOT comment on
   reviewer_style          free-form prose describing the desired
                           reviewer tone / depth (appended verbatim)
+  self_improve            bool (default False). When true, at the end of a
+                          cycle the tool reads other reviewers' comments on
+                          the in-scope PRs, asks the model for
+                          generalizable prompt improvements, and appends
+                          them to `learned_guidance`. Off by default so a
+                          configless install is byte-for-byte unchanged.
+                          Env: COPILOT_REVIEW_SELF_IMPROVE. Forced per-run
+                          by the --learn flag.
+  self_improve_min_interval_hours
+                          float (default 20). Minimum hours between learn
+                          runs (throttle via a state.json watermark), so it
+                          doesn't fire every 5-minute cycle. Env:
+                          COPILOT_REVIEW_SELF_IMPROVE_INTERVAL_HOURS.
+  self_improve_max_new_items
+                          int (default 3, capped 10). Max new guidance
+                          bullets a single learn run may append.
+  learned_guidance        list of learned bullets (managed by the tool;
+                          usually you don't edit this by hand). Each item
+                          is {kind: focus|avoid, category, text, rationale,
+                          learned_at, ...}. Injected into the review prompt
+                          on subsequent cycles.
+  memory_dir              str (default "memory"). Folder for the
+                          human-browsable wiki / mind-map of learnings,
+                          regenerated from learned_guidance each learn run.
 """
 from __future__ import annotations
 

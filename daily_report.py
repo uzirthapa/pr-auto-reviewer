@@ -128,15 +128,76 @@ def _migration_banner_html() -> str:
 </div>"""
 
 
+def _learned_blurb_html(learn_records: list[dict]) -> str:
+    """Small 'what I learned' blurb for the daily email, built from
+    `kind:"self_improve"` metrics records in the window. Returns "" when the
+    learn step didn't run at all in the window."""
+    if not learn_records:
+        return ""
+    items: list[dict] = []
+    considered = 0
+    prs: set = set()
+    for r in learn_records:
+        considered += r.get("comments_considered") or 0
+        for n in (r.get("source_prs") or []):
+            prs.add(n)
+        for it in (r.get("learned") or []):
+            if (it.get("text") or "").strip():
+                items.append(it)
+
+    if not items:
+        # The step ran but found nothing new worth adding — say so briefly.
+        return f"""
+<h3 style="margin:22px 0 6px 0;">🧠 What I learned</h3>
+<p style="color:#57606a;margin-top:0;font-size:13px;">
+  Studied {considered} comment(s) from other reviewers across
+  {len(prs)} PR(s) — nothing new to add to my review guidance this time.
+</p>"""
+
+    # Group learned bullets by category.
+    by_cat: dict[str, list[dict]] = {}
+    for it in items:
+        by_cat.setdefault(it.get("category") or "General", []).append(it)
+    cat_html: list[str] = []
+    for cat, group in by_cat.items():
+        lis = "".join(
+            f'<li style="margin:2px 0;">'
+            f'{"🚫 " if (it.get("kind") == "avoid") else ""}{escape(it.get("text") or "")}'
+            f'</li>'
+            for it in group
+        )
+        cat_html.append(
+            f'<div style="margin:6px 0;"><strong>{escape(cat)}</strong>'
+            f'<ul style="margin:4px 0 4px 18px;padding:0;">{lis}</ul></div>'
+        )
+
+    return f"""
+<h3 style="margin:22px 0 6px 0;">🧠 What I learned</h3>
+<p style="color:#57606a;margin-top:0;font-size:13px;">
+  Studied {considered} comment(s) from other reviewers across {len(prs)}
+  PR(s) and folded <strong>{len(items)}</strong> new lesson(s) into my
+  review guidance (also saved to the <code>memory/</code> wiki).</p>
+<div style="border:1px solid #d0d7de;border-radius:6px;padding:10px 16px;
+            margin:8px 0;background:#f6f8fa;font-size:14px;line-height:1.4;">
+  {''.join(cat_html)}
+</div>"""
+
+
 def render_html(records: list[dict], hours: int) -> str:
     now_local = datetime.now().strftime("%a %b %d %Y %H:%M %Z").strip()
     banner = _migration_banner_html()
+    # Self-improvement records are surfaced in their own blurb, not the
+    # per-PR review table/counters.
+    learn_records = [r for r in records if r.get("kind") == "self_improve"]
+    records = [r for r in records if r.get("kind") in ("review", "reconsider")]
+    learned_html = _learned_blurb_html(learn_records)
     if not records:
         return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;">
 <h2>🤖 Agentic-Automations Auto-Review — daily report</h2>
 {banner}
 <p>Window: last {hours}h (as of {escape(now_local)}).</p>
 <p><em>No reviews in this window.</em></p>
+{learned_html}
 </body></html>"""
 
     reviews     = [r for r in records if r.get("kind") == "review"]
@@ -296,6 +357,8 @@ def render_html(records: list[dict], hours: int) -> str:
 </table>
 
 {reasoning_html}
+
+{learned_html}
 
 <p style="color:#57606a;font-size:12px;margin-top:18px;">
   Sourced from <code>reviews\\metrics.jsonl</code>. Full text of each review lives in <code>reviews\\pr-&lt;num&gt;-&lt;sha&gt;.json</code> next to it.

@@ -28,6 +28,14 @@ list_open_prs  ──►  fingerprint short-circuit  ──►  per-PR loop
                                                             └─► run_copilot_reconsider
                                                                   └─► submit_review_via_api
                                                                   └─► dismiss_review (if block→comment)
+
+                            end of cycle (opt-in, throttled):
+                            maybe_self_improve
+                              └─► gather_other_reviewer_comments (Python/gh)
+                                    └─► run_copilot_self_improve (JSON contract)
+                                          └─► _append_learned_guidance (config.json)
+                                          └─► rebuild_memory (memory/ wiki + mind map)
+                                          └─► append_self_improve_metrics / __self_improve state
 ```
 
 Per-cycle flow (every 5 min via Scheduled Task):
@@ -52,12 +60,38 @@ we don't fully agree with but no longer want to block on; we then
 explicitly dismiss our prior `CHANGES_REQUESTED` via the
 `/pulls/{n}/reviews/{id}/dismissals` API so branch protection clears.
 
+## Self-improvement (learn step)
+
+**Opt-in, off by default** (`self_improve` in `config.json`, or
+`--learn`). At the END of a cycle, `maybe_self_improve` reads the comments
+*other human* reviewers left on the in-scope PRs (Python does the `gh`
+I/O — same hard rule as reviews), asks the model (strict JSON contract via
+`run_copilot_self_improve`) for a few *generalizable* prompt improvements,
+and appends them to `learned_guidance` in `config.json`. Those bullets are
+injected into the review prompt on later cycles via the
+`__LEARNED_GUIDANCE_BLOCK__` token (see `_render_learned_guidance_block`).
+
+- **Throttled** by `self_improve_min_interval_hours` (default 20h) via the
+  `__last_self_improve_at` watermark in `state.json`; `--learn` bypasses
+  it. Capped at `self_improve_max_new_items` (default 3) per run.
+- **Memory wiki:** `rebuild_memory` regenerates the `memory/` folder
+  (index.md with a Mermaid `mindmap` + per-category detail files) from the
+  full `learned_guidance` list — deterministic/idempotent, a pure function
+  of config, safe to regenerate every run.
+- **Surfacing:** each run appends a `kind:"self_improve"` row to
+  `reviews/metrics.jsonl` (daily report renders a "🧠 What I learned"
+  blurb) and updates the top-level `__self_improve` block in `state.json`
+  (the sibling **AutoTasksUI** cockpit reads it for its Activity feed +
+  `learned` counter; see `../AutoTasksUI/src/main/adapters.ts`).
+- Defaults preserve byte-for-byte behavior when `config.json` is missing:
+  disabled → the review prompt renders identically to before.
+
 ## Files
 
 | File                                          | Role                                                                 |
 | --------------------------------------------- | -------------------------------------------------------------------- |
-| `auto_review.py`                              | Main script. All review / reconsider logic, GH I/O, state mgmt.      |
-| `daily_report.py`                             | Reads `reviews/metrics.jsonl`, renders HTML summary of last 24h.     |
+| `auto_review.py`                              | Main script. All review / reconsider / self-improve logic, GH I/O, state mgmt. |
+| `daily_report.py`                             | Reads `reviews/metrics.jsonl`, renders HTML summary of last 24h (incl. "What I learned" blurb). |
 | `send_daily_report.py`                        | Calls `daily_report.render_html`, sends via Outlook COM (PowerShell). |
 | `rerun_comment_verdicts.py`                   | One-off backfill: re-run reconsider on PRs whose stored verdict was the legacy `comment`. |
 | `config.py`                                   | Tiny loader for `config.json`. No fallbacks logic here — defaults live in the consumers. |
@@ -67,10 +101,12 @@ explicitly dismiss our prior `CHANGES_REQUESTED` via the
 | `install.ps1`                                 | One-line bootstrap installer for teammates: prereq-checks, clones, runs `setup.py`. Invoked via `iwr ... | iex`. |
 | `.copilot/skills/setup-auto-reviewer/SKILL.md`| Copilot CLI skill walking new users through `setup.py`.              |
 | `config.example.json`                         | Documented template colleagues copy / edit.                          |
-| `config.json` *(gitignored)*                  | Per-install overrides. Missing is fine — defaults reproduce my live setup. |
-| `state.json` *(gitignored)*                   | Per-PR runtime state (head_sha, decision, review_id, reconsider history, top-level `__last_prs_fingerprint`). |
+| `config.json` *(gitignored)*                  | Per-install overrides. Missing is fine — defaults reproduce my live setup. Also holds tool-managed `learned_guidance`. |
+| `state.json` *(gitignored)*                   | Per-PR runtime state + top-level `__last_prs_fingerprint`, `__last_self_improve_at`, `__self_improve` summary. |
 | `reviews/pr-<num>-<sha>.json` *(gitignored)*  | Full per-review artifact (prompt + raw JSON response + diff metadata). |
-| `reviews/metrics.jsonl` *(gitignored)*        | Append-only one-row-per-review ledger feeding the daily report.      |
+| `reviews/self-improve-<ts>.json` *(gitignored)* | Per learn-run artifact (source comments + model result + appended items). |
+| `reviews/metrics.jsonl` *(gitignored)*        | Append-only ledger; one row per review/reconsider + `kind:"self_improve"` learn rows. Feeds the daily report. |
+| `memory/` *(gitignored)*                      | Regenerated wiki / mind-map of learnings (`rebuild_memory`). Un-ignore to commit as team knowledge. |
 | `auto_review.log`, `daily_report.log` *(gitignored)* | Rolling logs.                                                 |
 
 ## Conventions

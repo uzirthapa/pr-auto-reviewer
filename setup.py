@@ -700,6 +700,31 @@ and depth you want. Skip if you're happy with the defaults.
     elif "reviewer_style" in cfg:
         cfg.pop("reviewer_style")
 
+    _print_header("8) Self-improvement (learn from other reviewers)")
+    print("""
+At the end of each cycle the tool can read the comments OTHER (human)
+reviewers leave on the same PRs, ask the model which recurring issues they
+catch that it doesn't, and fold those lessons into its own review prompt
+(stored in `learned_guidance` and a browsable `memory/` wiki + mind map).
+
+It's throttled (~once a day) and capped at a few new bullets per run. Off
+by default. You can always force a one-off run with:
+    python auto_review.py --learn
+""".rstrip())
+    self_improve = _ask_yes_no(
+        "Enable end-of-cycle self-improvement?",
+        default=bool(existing.get("self_improve", False)),
+        non_interactive=non_interactive,
+    )
+    cfg["self_improve"] = self_improve
+    if self_improve:
+        cfg.setdefault("self_improve_min_interval_hours",
+                       existing.get("self_improve_min_interval_hours", 20))
+        cfg.setdefault("self_improve_max_new_items",
+                       existing.get("self_improve_max_new_items", 3))
+        cfg.setdefault("memory_dir", existing.get("memory_dir", "memory"))
+        cfg.setdefault("learned_guidance", existing.get("learned_guidance", []))
+
     return cfg
 
 
@@ -715,7 +740,7 @@ def offer_register_tasks(*, non_interactive: bool, cfg: dict[str, Any] | None = 
     report_time = cfg.get("report_time", "07:00")
     if not _is_valid_hhmm(report_time):
         report_time = "07:00"
-    _print_header("8) Windows Scheduled Tasks")
+    _print_header("9) Windows Scheduled Tasks")
     print(f"""
 Two tasks ship with this project:
   • AgenticAutomations-AutoReview   — runs every 5 min (auto_review.py)

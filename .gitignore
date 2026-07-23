@@ -8,6 +8,11 @@ reviews/
 repos/
 full_dryrun.out
 
+# Reviewer "memory" wiki/mind-map — regenerated per-install from
+# config.json learned_guidance. Un-ignore if you want to commit it as
+# shared team knowledge.
+memory/
+
 # Per-installation config (use config.example.json as a template).
 config.json
 

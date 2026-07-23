@@ -86,6 +86,11 @@ REVIEWS_DIR = SCRIPT_DIR / "reviews"
 # impact reporting ("how many issues caught, how many blocks, etc.").
 METRICS_PATH = REVIEWS_DIR / "metrics.jsonl"
 
+# Human-browsable "wiki / mind map" of everything the reviewer has learned
+# from other reviewers (regenerated from config.json `learned_guidance` on
+# each learn run). Path overridable via config.json "memory_dir".
+MEMORY_DIR = SCRIPT_DIR / str(_user_config.get("memory_dir", "memory"))
+
 
 def _apply_runtime_context(repo: str, gh_host: str) -> None:
     """Point this run at a specific repo/host.
@@ -296,6 +301,60 @@ def _review_authors() -> list[str]:
 REVIEW_AUTHORS = _review_authors()
 
 
+# ---------------------------------------------------------------------------
+# Self-improvement (learn from other reviewers)
+# ---------------------------------------------------------------------------
+# At the END of a cycle we can OPTIONALLY read the comments *other* (human)
+# reviewers left on the in-scope PRs, ask the model which recurring issue
+# types they caught that our reviewer prompt doesn't yet emphasize, and
+# append concise, generalizable bullets to config.json's `learned_guidance`.
+# Those bullets are injected into the review prompt on subsequent cycles
+# (see `_render_learned_guidance_block`), so the reviewer gets better over
+# time without a human editing the prompt.
+#
+# DISABLED BY DEFAULT: a fresh checkout / configless live install keeps
+# byte-for-byte identical behavior. Enable via config.json "self_improve":
+# true, the COPILOT_REVIEW_SELF_IMPROVE=1 env var, or the --learn flag.
+def _self_improve_enabled() -> bool:
+    raw = os.environ.get("COPILOT_REVIEW_SELF_IMPROVE")
+    if raw is not None:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(_user_config.get("self_improve", False))
+
+
+SELF_IMPROVE = _self_improve_enabled()
+
+
+# The learn step is expensive (one extra model call) and its input — other
+# reviewers' comments — accrues slowly, so we throttle it well below the
+# per-cycle cadence. Default ~20h means roughly once a day even on a
+# 5-minute scheduler. A watermark in state.json (`__last_self_improve_at`)
+# enforces it; --learn bypasses the throttle for a manual run.
+def _self_improve_min_interval_hours() -> float:
+    raw = (os.environ.get("COPILOT_REVIEW_SELF_IMPROVE_INTERVAL_HOURS")
+           or _user_config.get("self_improve_min_interval_hours") or 20)
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 20.0
+
+
+SELF_IMPROVE_MIN_INTERVAL_HOURS = _self_improve_min_interval_hours()
+
+
+# Hard cap on how many new guidance bullets a single learn run may append,
+# so the prompt can't balloon from one noisy cycle.
+def _self_improve_max_new_items() -> int:
+    raw = _user_config.get("self_improve_max_new_items", 3)
+    try:
+        return max(1, min(int(raw), 10))
+    except (TypeError, ValueError):
+        return 3
+
+
+SELF_IMPROVE_MAX_NEW_ITEMS = _self_improve_max_new_items()
+
+
 def prioritize_prs(prs: list[PullRequest]) -> list[PullRequest]:
     """Order PRs so prioritized authors come first, each group otherwise
     keeping ascending-number order for determinism."""
@@ -386,13 +445,34 @@ def _gh_env() -> dict[str, str]:
     return env
 
 
+def _npm_registry() -> str:
+    """Upstream npm registry for the Node-based AI CLI subprocess. Empty ->
+    defer to the org-managed global ~/.npmrc (recommended). Set the CFS proxy
+    (https://packagefeedproxy.microsoft.io/npm/) via config `npm_registry` or
+    COPILOT_REVIEW_NPM_REGISTRY when a machine's ambient config is missing."""
+    env = os.environ.get("COPILOT_REVIEW_NPM_REGISTRY")
+    if env is not None:
+        return env.strip()
+    val = _user_config.get("npm_registry", "")
+    return "" if val is None else str(val).strip()
+
+
+NPM_REGISTRY = _npm_registry()
+
+
 def _ai_env() -> dict[str, str]:
-    """Environment for the (Node-based) AI CLI subprocess that suppresses the
-    background version/update checks which reach the PUBLIC npm registry
-    (registry.npmjs.org). This org's Defender Network Protection blocks that
-    host, so each check raised a recurring "blocked by your IT admin" toast
-    (this task runs every ~5 min). These flags keep the CLI on the internal
-    feed and quiet, so it never triggers the block."""
+    """Environment for the (Node-based) AI CLI subprocess.
+
+    Two jobs: (1) suppress the background version/update checks which reach the
+    PUBLIC npm registries, and (2) keep the CLI on a CFS-protected feed.
+    Microsoft-managed devices now HARD-BLOCK direct access to registry.npmjs.org
+    / registry.yarnpkg.com / registry.npmmirror.com, so a stray check/install
+    against them fails outright (it used to be just a recurring "blocked by your
+    IT admin" Defender toast; this task runs every ~5 min). These flags silence
+    the noisy checks; when NPM_REGISTRY is set we also pin the registry
+    (NPM_CONFIG_REGISTRY / YARN_REGISTRY) to the CFS proxy so the CLI doesn't
+    depend on the ambient ~/.npmrc. Empty NPM_REGISTRY -> defer to the
+    org-managed global ~/.npmrc (the recommended, no-impact default)."""
     env = os.environ.copy()
     env.update({
         "NO_UPDATE_NOTIFIER": "1",
@@ -401,6 +481,9 @@ def _ai_env() -> dict[str, str]:
         "NPM_CONFIG_AUDIT": "false",
         "ADBLOCK": "1",
     })
+    if NPM_REGISTRY:
+        env["NPM_CONFIG_REGISTRY"] = NPM_REGISTRY  # npm + pnpm
+        env["YARN_REGISTRY"] = NPM_REGISTRY        # yarn classic
     return env
 
 
@@ -779,7 +862,7 @@ Large-file opportunities (independent of the baseline file):
     adding/raising that file's entry in
     `scripts/file-line-limit-baseline.json`, in which case follow
     the rule above and block with severity="required".
-__CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK__
+__CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK____LEARNED_GUIDANCE_BLOCK__
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
     extracting this" without saying what and why.
@@ -810,6 +893,45 @@ def _format_bullets(items: Any) -> str:
     return "\n".join(bullets)
 
 
+def _render_learned_guidance_block(items: Any) -> str:
+    """Render machine-learned guidance (config.json `learned_guidance`,
+    grown by the self-improvement step) into the review prompt.
+
+    Items are {"kind": "focus"|"avoid", "text": ...} objects; bare strings
+    are treated as focus. Returns "" when there's nothing learned yet, so
+    installs without a `learned_guidance` key see no prompt change.
+    """
+    focus: list[str] = []
+    avoid: list[str] = []
+    for it in (items or []):
+        if isinstance(it, str):
+            t = it.strip()
+            if t:
+                focus.append(t)
+            continue
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        if not text:
+            continue
+        if str(it.get("kind") or "focus").strip().lower() == "avoid":
+            avoid.append(text)
+        else:
+            focus.append(text)
+    if not focus and not avoid:
+        return ""
+    parts = [
+        "\n\nLearned from other reviewers on this repo (auto-curated from "
+        "human review comments; treat as additional priorities):\n"
+    ]
+    if focus:
+        parts.append("\n".join(f"  - {t}" for t in focus) + "\n")
+    if avoid:
+        parts.append("Also learned NOT to comment on (auto-curated):\n")
+        parts.append("\n".join(f"  - {t}" for t in avoid) + "\n")
+    return "".join(parts)
+
+
 def _render_review_instructions() -> str:
     """Render REVIEW_INSTRUCTIONS_TEMPLATE with per-install config injected.
 
@@ -823,6 +945,9 @@ def _render_review_instructions() -> str:
     focus_bullets = _format_bullets(_user_config.get("review_focus"))
     avoid_bullets = _format_bullets(_user_config.get("review_avoid"))
     style = (_user_config.get("reviewer_style") or "").strip()
+    learned_block = _render_learned_guidance_block(
+        _user_config.get("learned_guidance")
+    )
 
     custom_focus_block = (
         f"\n\nAdditional focus areas this reviewer cares about (treat as priorities, not exhaustive):\n{focus_bullets}\n"
@@ -842,6 +967,7 @@ def _render_review_instructions() -> str:
         .replace("__CUSTOM_FOCUS_BLOCK__", custom_focus_block)
         .replace("__CUSTOM_AVOID_BLOCK__", custom_avoid_block)
         .replace("__REVIEWER_STYLE_BLOCK__", reviewer_style_block)
+        .replace("__LEARNED_GUIDANCE_BLOCK__", learned_block)
     )
 
 
@@ -2174,6 +2300,674 @@ def _do_fresh_review(repo: str, pr: PullRequest, state: dict[str, Any],
     return f"reviewed:{review['decision']}"
 
 
+SELF_IMPROVE_INSTRUCTIONS = """\
+You are tuning the prompt of an automated code reviewer by learning from
+the HUMAN reviewers who work on this same repository. You will be given:
+  - The reviewer's CURRENT standing guidance (the focus areas, the
+    "never comment on" list, the free-form style, and any previously
+    learned bullets).
+  - A corpus of recent review comments written by OTHER (human) reviewers
+    on real pull requests in this repo — the kinds of issues they raise,
+    the things they nitpick, and the things they let slide.
+
+Your job: infer a SMALL number of concrete, generalizable additions to
+the reviewer's guidance so that next time it reviews a PR it catches the
+same classes of issues the humans care about (and stops flagging things
+the humans clearly don't care about).
+
+You will NOT browse the repo, run tools, or fetch anything. Reason ONLY
+from the text provided.
+
+You MUST write your response as a JSON object to a file named
+`review_output.json` in the current working directory. Do not print the
+JSON to stdout. The JSON must match this schema:
+
+{
+  "new_guidance": [
+    {
+      "kind": "focus" | "avoid",
+      "category": "<short 1-3 word topic label the bullet belongs under,
+                    e.g. 'Correctness', 'Performance', 'Telemetry',
+                    'Testing', 'Security', 'API contracts'. Reuse the same
+                    label for related bullets so they group together.>",
+      "text": "<ONE concise, GENERALIZABLE reviewer instruction — an
+                imperative the reviewer can apply to any future PR. NOT a
+                restatement of a single comment. NOT PR-specific.>",
+      "rationale": "<one sentence: which recurring human-comment pattern
+                     motivated this>"
+    }
+  ],
+  "notes": "<optional one-line summary; may be empty>"
+}
+
+Hard rules:
+  - Propose AT MOST __MAX_NEW_ITEMS__ items. Fewer is better. If the human
+    comments reveal no NEW, generalizable pattern beyond what the current
+    guidance already covers, return an EMPTY "new_guidance" array. Adding
+    noise makes the reviewer worse — an empty result is the correct and
+    common answer.
+  - "kind":"focus" = a class of problem the humans catch that our reviewer
+    should start catching. "kind":"avoid" = a class of comment the humans
+    clearly treat as noise / never raise, that our reviewer should stop
+    making.
+  - Each "text" must be generalizable and self-contained: it will be
+    appended verbatim to the reviewer's prompt as a bullet. Do not
+    reference a specific PR number, file, author, or one-off incident.
+  - Do NOT duplicate or lightly reword guidance the reviewer already has.
+    Only surface genuinely NEW, recurring signal.
+  - Ignore approvals/LGTM/chit-chat, CI/bot messages, and one-off
+    comments. Look for PATTERNS across multiple comments or reviewers.
+  - Keep each "text" under ~200 characters.
+
+Write the JSON object to `review_output.json` now.
+"""
+
+
+def _validate_self_improve(obj: Any) -> dict[str, Any]:
+    if not isinstance(obj, dict):
+        raise ValueError("self-improve result must be a JSON object")
+    raw = obj.get("new_guidance")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError("new_guidance must be a list")
+    items: list[dict[str, str]] = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        if not text:
+            continue
+        kind = str(it.get("kind") or "focus").strip().lower()
+        if kind not in ("focus", "avoid"):
+            kind = "focus"
+        category = str(it.get("category") or "").strip()[:40] or "General"
+        items.append({
+            "kind": kind,
+            "category": category,
+            "text": text[:300],
+            "rationale": str(it.get("rationale") or "").strip()[:300],
+        })
+    return {
+        "new_guidance": items,
+        "notes": str(obj.get("notes") or "").strip(),
+    }
+
+
+def run_copilot_self_improve(prompt: str) -> dict[str, Any]:
+    """Reasoning-only call: learn prompt improvements from human comments."""
+    return run_copilot_review_call(prompt, validator=_validate_self_improve)
+
+
+def _days_ago_iso(days: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                         time.gmtime(time.time() - days * 86400))
+
+
+def gather_other_reviewer_comments(repo: str, prs: list[PullRequest],
+                                   since_iso: str, *,
+                                   max_per_pr: int = 40,
+                                   max_total: int = 200
+                                   ) -> list[dict[str, Any]]:
+    """Collect review/issue comments written by OTHER humans (not us, not
+    bots) on the given PRs, created after `since_iso`.
+
+    Python does all the GitHub I/O here (per the hard design rule); the
+    model only reasons over the returned text. Bots are filtered out so
+    the model learns from humans. Returns a flat, capped list of
+    {pr_number, author, kind, file, line, body, url} dicts.
+    """
+    me = get_viewer_login()
+    owner, name = repo.split("/", 1)
+    out: list[dict[str, Any]] = []
+
+    def _gh_json(args: list[str]) -> Any:
+        try:
+            return json.loads(gh(args).stdout or "[]")
+        except Exception as e:
+            logging.warning("self-improve comment fetch failed (%s): %s", args, e)
+            return []
+
+    def _is_human_other(login: str) -> bool:
+        if not login or login == me:
+            return False
+        return not login.endswith("[bot]")
+
+    for pr in prs:
+        if len(out) >= max_total:
+            break
+        n_pr = 0
+
+        issue_comments = _gh_json([
+            "api", f"repos/{owner}/{name}/issues/{pr.number}/comments",
+            "--paginate", "-X", "GET", "-f", f"since={since_iso}",
+        ])
+        for c in issue_comments:
+            login = (c.get("user") or {}).get("login") or ""
+            if not _is_human_other(login):
+                continue
+            body = (c.get("body") or "").strip()
+            if not body:
+                continue
+            out.append({
+                "pr_number": pr.number,
+                "author": login,
+                "kind": "issue",
+                "file": None,
+                "line": None,
+                "body": body[:1500],
+                "url": c.get("html_url"),
+            })
+            n_pr += 1
+            if n_pr >= max_per_pr or len(out) >= max_total:
+                break
+
+        if len(out) >= max_total:
+            break
+
+        review_comments = _gh_json([
+            "api", f"repos/{owner}/{name}/pulls/{pr.number}/comments",
+            "--paginate",
+        ])
+        for c in review_comments:
+            login = (c.get("user") or {}).get("login") or ""
+            if not _is_human_other(login):
+                continue
+            if (c.get("created_at") or "") <= since_iso:
+                continue
+            body = (c.get("body") or "").strip()
+            if not body:
+                continue
+            out.append({
+                "pr_number": pr.number,
+                "author": login,
+                "kind": "inline",
+                "file": c.get("path"),
+                "line": c.get("line") or c.get("original_line"),
+                "body": body[:1500],
+                "url": c.get("html_url"),
+            })
+            n_pr += 1
+            if n_pr >= max_per_pr or len(out) >= max_total:
+                break
+
+    return out
+
+
+def _existing_guidance_texts() -> set[str]:
+    """Normalized texts already present in the reviewer's guidance, so we
+    don't re-learn something the human (or a prior learn run) already
+    configured."""
+    texts: set[str] = set()
+
+    def _add(v: Any) -> None:
+        for x in (v or []):
+            if isinstance(x, str):
+                s = x
+            elif isinstance(x, dict):
+                s = str(x.get("text") or "")
+            else:
+                s = str(x)
+            s = s.strip().lower()
+            if s:
+                texts.add(s)
+
+    _add(_user_config.get("review_focus"))
+    _add(_user_config.get("review_avoid"))
+    _add(_user_config.get("learned_guidance"))
+    style = str(_user_config.get("reviewer_style") or "").strip().lower()
+    if style:
+        texts.add(style)
+    return texts
+
+
+def _read_config_json() -> dict[str, Any]:
+    p = _user_config.path()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logging.warning("could not read %s for self-improve: %s", p, e)
+        return {}
+
+
+def _append_learned_guidance(new_items: list[dict[str, str]],
+                             provenance: dict[str, Any] | None = None
+                             ) -> list[dict[str, str]]:
+    """Merge accepted items into config.json's `learned_guidance` list and
+    persist. Reads the file fresh (not the import-time cache) so we never
+    clobber concurrent edits. Returns the items actually appended.
+
+    `provenance` (PR numbers / reviewers considered this run) is stored on
+    each new entry so the memory wiki can attribute where a learning came
+    from.
+
+    config.py is intentionally read-only; this is the one writer, mirroring
+    setup.write_config's on-disk format (indent=2, ensure_ascii=False).
+    """
+    cfg = _read_config_json()
+    existing = cfg.get("learned_guidance")
+    if not isinstance(existing, list):
+        existing = []
+
+    seen = set()
+    for x in existing:
+        t = (x.get("text") if isinstance(x, dict) else str(x)).strip().lower()
+        if t:
+            seen.add(t)
+    # Also skip anything already covered by human-authored guidance.
+    seen |= _existing_guidance_texts()
+
+    appended: list[dict[str, str]] = []
+    for it in new_items:
+        t = it["text"].strip().lower()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        entry: dict[str, Any] = {
+            "kind": it["kind"],
+            "category": it.get("category") or "General",
+            "text": it["text"],
+        }
+        if it.get("rationale"):
+            entry["rationale"] = it["rationale"]
+        entry["learned_at"] = _iso_now()
+        if provenance:
+            if provenance.get("pr_numbers"):
+                entry["source_prs"] = provenance["pr_numbers"]
+            if provenance.get("reviewers"):
+                entry["source_reviewers"] = provenance["reviewers"]
+        existing.append(entry)
+        appended.append(entry)
+
+    if not appended:
+        return []
+
+    cfg["learned_guidance"] = existing
+    _user_config.path().write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return appended
+
+
+def save_self_improve_artifact(comments: list[dict[str, Any]],
+                               result: dict[str, Any],
+                               appended: list[dict[str, str]]) -> Path:
+    REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    path = REVIEWS_DIR / f"self-improve-{ts}.json"
+    path.write_text(json.dumps({
+        "at_iso": _iso_now(),
+        "repo": ACTIVE_REPO,
+        "comments_considered": len(comments),
+        "source_comments": comments,
+        "model_result": result,
+        "appended": appended,
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", str(text).strip().lower()).strip("-")
+    return s or "general"
+
+
+def _mermaid_safe(text: str, limit: int = 60) -> str:
+    """Sanitize text for a Mermaid mindmap node (parens/brackets/quotes and
+    newlines break the parser)."""
+    s = re.sub(r"\s+", " ", str(text)).strip()
+    for ch in "()[]{}\"":
+        s = s.replace(ch, " ")
+    s = s.replace(";", ",").replace("#", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) > limit:
+        s = s[: limit - 1].rstrip() + "…"
+    return s or "…"
+
+
+def rebuild_memory(entries: list[Any]) -> Path | None:
+    """(Re)generate the memory wiki / mind-map folder from the FULL
+    `learned_guidance` list. Deterministic and idempotent — the whole
+    folder is a pure function of `entries`, so it's safe to regenerate on
+    every learn run.
+
+    Layout:
+      <memory_dir>/index.md            mind map (Mermaid) + outline + links
+      <memory_dir>/<category>.md       detailed entries per category
+
+    Returns the index path, or None when nothing has been learned yet.
+    """
+    norm: list[dict[str, Any]] = []
+    for e in (entries or []):
+        if isinstance(e, str):
+            text = e.strip()
+            if text:
+                norm.append({"kind": "focus", "category": "General",
+                             "text": text, "rationale": "", "learned_at": "",
+                             "source_prs": [], "source_reviewers": []})
+            continue
+        if not isinstance(e, dict):
+            continue
+        text = str(e.get("text") or "").strip()
+        if not text:
+            continue
+        kind = str(e.get("kind") or "focus").strip().lower()
+        if kind not in ("focus", "avoid"):
+            kind = "focus"
+        norm.append({
+            "kind": kind,
+            "category": str(e.get("category") or "General").strip() or "General",
+            "text": text,
+            "rationale": str(e.get("rationale") or "").strip(),
+            "learned_at": str(e.get("learned_at") or "").strip(),
+            "source_prs": e.get("source_prs") or [],
+            "source_reviewers": e.get("source_reviewers") or [],
+        })
+    if not norm:
+        return None
+
+    # Group by category, preserving first-seen order.
+    cats: dict[str, list[dict[str, Any]]] = {}
+    for e in norm:
+        cats.setdefault(e["category"], []).append(e)
+
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Assign unique slugs per category.
+    slugs: dict[str, str] = {}
+    used: set[str] = set()
+    for cat in cats:
+        base = _slugify(cat)
+        slug, i = base, 2
+        while slug in used:
+            slug = f"{base}-{i}"
+            i += 1
+        used.add(slug)
+        slugs[cat] = slug
+
+    # Per-category detail files.
+    for cat, items in cats.items():
+        lines = [
+            f"# {cat}",
+            "",
+            f"_{len(items)} learned item(s). Auto-generated from "
+            f"`config.json` `learned_guidance`; regenerated on each learn "
+            f"run — do not edit by hand._",
+            "",
+        ]
+        focus_items = [i for i in items if i["kind"] == "focus"]
+        avoid_items = [i for i in items if i["kind"] == "avoid"]
+        for title, group in (("Watch for", focus_items),
+                             ("Do NOT comment on", avoid_items)):
+            if not group:
+                continue
+            lines += [f"## {title}", ""]
+            for it in group:
+                lines.append(f"- **{it['text']}**")
+                if it.get("rationale"):
+                    lines.append(f"  - _Why:_ {it['rationale']}")
+                meta = []
+                if it.get("learned_at"):
+                    meta.append(f"learned {it['learned_at']}")
+                if it.get("source_prs"):
+                    meta.append("from PR(s) "
+                                + ", ".join(f"#{n}" for n in it["source_prs"]))
+                if it.get("source_reviewers"):
+                    meta.append("reviewers: "
+                                + ", ".join(map(str, it["source_reviewers"])))
+                if meta:
+                    lines.append(f"  - _{' · '.join(meta)}_")
+            lines.append("")
+        (MEMORY_DIR / f"{slugs[cat]}.md").write_text(
+            "\n".join(lines), encoding="utf-8")
+
+    # index.md — mind map + outline.
+    idx = [
+        "# Reviewer Memory",
+        "",
+        f"What the automated reviewer has learned from other reviewers on "
+        f"**{ACTIVE_REPO or 'this repo'}**. **{len(norm)}** item(s) across "
+        f"**{len(cats)}** categor{'y' if len(cats) == 1 else 'ies'}. "
+        f"Last updated {_iso_now()}.",
+        "",
+        "> Auto-generated from `config.json` `learned_guidance` on each "
+        "learn run. The same bullets are injected into the review prompt.",
+        "",
+        "## Mind map",
+        "",
+        "```mermaid",
+        "mindmap",
+        "  root((Reviewer Memory))",
+    ]
+    for cat, items in cats.items():
+        idx.append(f"    {_mermaid_safe(cat, 40)}")
+        for it in items[:8]:
+            idx.append(f"      {_mermaid_safe(it['text'])}")
+    idx += ["```", "", "## Categories", ""]
+    for cat, items in cats.items():
+        idx.append(f"- [{cat}]({slugs[cat]}.md) — {len(items)} item(s)")
+        for it in items:
+            tag = "🚫" if it["kind"] == "avoid" else "•"
+            idx.append(f"  - {tag} {it['text']}")
+    idx.append("")
+    index_path = MEMORY_DIR / "index.md"
+    index_path.write_text("\n".join(idx), encoding="utf-8")
+    return index_path
+
+
+def append_self_improve_metrics(*, dry_run: bool, considered: int,
+                                proposed: list[dict[str, Any]],
+                                appended: list[dict[str, Any]],
+                                provenance: dict[str, Any]) -> None:
+    """Append one `kind:"self_improve"` record to the metrics ledger so the
+    daily report (and any dashboard reading metrics.jsonl) can show what the
+    reviewer learned. One row per learn run."""
+    REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    record = {
+        "at_iso": _iso_now(),
+        "kind": "self_improve",
+        "dry_run": dry_run,
+        "comments_considered": considered,
+        "proposed_count": len(proposed),
+        "learned_count": len(appended),
+        "learned": [
+            {"kind": it["kind"], "category": it.get("category", "General"),
+             "text": it["text"]}
+            for it in appended
+        ],
+        "source_prs": provenance.get("pr_numbers", []),
+        "source_reviewers": provenance.get("reviewers", []),
+    }
+    with _METRICS_LOCK:
+        with METRICS_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _record_self_improve_state(state: dict[str, Any], *, status: str,
+                               considered: int,
+                               proposed: list[dict[str, Any]],
+                               appended: list[dict[str, Any]],
+                               provenance: dict[str, Any]) -> None:
+    """Persist a compact self-improve summary under the top-level
+    `__self_improve` key in state.json. The AutoTasks cockpit reads
+    state.json, so this feeds its Activity feed + counters."""
+    now = _iso_now()
+    si = state.get("__self_improve") or {}
+    si["last_run_iso"] = now
+    si["last_status"] = status
+    si["last_considered"] = considered
+    si["last_proposed"] = len(proposed)
+    si["last_learned"] = len(appended)
+    si["total_learned"] = int(si.get("total_learned", 0) or 0) + len(appended)
+    recent = si.get("recent") or []
+    for it in appended:
+        recent.insert(0, {
+            "at_iso": now,
+            "kind": it["kind"],
+            "category": it.get("category", "General"),
+            "text": it["text"],
+            "source_prs": provenance.get("pr_numbers", []),
+        })
+    si["recent"] = recent[:20]
+    state["__self_improve"] = si
+    save_state(state)
+
+
+def maybe_self_improve(repo: str, prs: list[PullRequest],
+                       state: dict[str, Any], dry_run: bool, *,
+                       forced: bool = False) -> str:
+    """End-of-cycle learn step: read other reviewers' comments, ask the
+    model for generalizable prompt improvements, append them to
+    `learned_guidance` in config.json for future cycles.
+
+    No-op unless enabled (config `self_improve`, env, or --learn/forced).
+    Throttled by `self_improve_min_interval_hours` via a state watermark;
+    `forced` (--learn) bypasses the throttle. Returns a short status.
+    """
+    if not (SELF_IMPROVE or forced):
+        return "skip-disabled"
+
+    last = state.get("__last_self_improve_at")
+    hours = SELF_IMPROVE_MIN_INTERVAL_HOURS
+    if not forced and last and hours > 0 and _hours_since_iso(last) < hours:
+        logging.info(
+            "Self-improve throttled: last run %s (< %.1fh ago)", last, hours,
+        )
+        return "skip-throttled"
+
+    since_iso = last or _days_ago_iso(7)
+    logging.info("Self-improve: gathering other reviewers' comments since %s across %d PR(s)",
+                 since_iso, len(prs))
+    try:
+        comments = gather_other_reviewer_comments(repo, prs, since_iso)
+    except Exception as e:
+        logging.exception("Self-improve: failed gathering comments: %s", e)
+        return "error:gather"
+
+    # Advance the watermark even when there's nothing to learn, so we don't
+    # rescan the same window every cycle.
+    state["__last_self_improve_at"] = _iso_now()
+    save_state(state)
+
+    if not comments:
+        logging.info("Self-improve: no other-reviewer comments in window; nothing to learn")
+        _record_self_improve_state(state, status="no-comments", considered=0,
+                                   proposed=[], appended=[], provenance={})
+        return "no-comments"
+
+    provenance = {
+        "pr_numbers": sorted({c["pr_number"] for c in comments}),
+        "reviewers": sorted({c["author"] for c in comments if c.get("author")}),
+    }
+
+    prompt = build_self_improve_prompt(comments)
+    try:
+        result = run_copilot_self_improve(prompt)
+    except Exception as e:
+        logging.exception("Self-improve: model call failed: %s", e)
+        return "error:model"
+
+    proposed = result.get("new_guidance") or []
+    proposed = proposed[:SELF_IMPROVE_MAX_NEW_ITEMS]
+    logging.info("Self-improve: model proposed %d guidance item(s) from %d comment(s)",
+                 len(proposed), len(comments))
+
+    if dry_run:
+        for it in proposed:
+            print(f"  [self-improve/dry-run] +{it['kind']}/{it.get('category','General')}: {it['text']}")
+        save_self_improve_artifact(comments, result, [])
+        append_self_improve_metrics(dry_run=True, considered=len(comments),
+                                    proposed=proposed, appended=[],
+                                    provenance=provenance)
+        _record_self_improve_state(state, status=f"dry-run:{len(proposed)}-proposed",
+                                   considered=len(comments), proposed=proposed,
+                                   appended=[], provenance=provenance)
+        return f"dry-run:{len(proposed)}-proposed"
+
+    appended = _append_learned_guidance(proposed, provenance) if proposed else []
+    save_self_improve_artifact(comments, result, appended)
+    for it in appended:
+        logging.info("Self-improve: learned (%s/%s) %s",
+                     it["kind"], it.get("category", "General"), it["text"])
+    # Regenerate the memory wiki/mind-map from the full learned set so it
+    # always reflects config.json exactly (idempotent).
+    if appended:
+        try:
+            idx = rebuild_memory(_read_config_json().get("learned_guidance") or [])
+            if idx:
+                logging.info("Self-improve: memory wiki updated at %s", idx)
+        except Exception as e:
+            logging.exception("Self-improve: memory rebuild failed: %s", e)
+    # Surface the run to the ledger (daily report) and to state.json (the
+    # AutoTasks cockpit reads both the log and state.json).
+    status = f"learned:{len(appended)}"
+    append_self_improve_metrics(dry_run=False, considered=len(comments),
+                                proposed=proposed, appended=appended,
+                                provenance=provenance)
+    _record_self_improve_state(state, status=status, considered=len(comments),
+                               proposed=proposed, appended=appended,
+                               provenance=provenance)
+    return status
+
+
+def _hours_since_iso(iso: str) -> float:
+    """Hours between a UTC ISO timestamp (…Z) and now, using UTC math."""
+    try:
+        import calendar
+        t = time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
+        then = calendar.timegm(t)
+        return max(0.0, (time.time() - then) / 3600.0)
+    except Exception:
+        return float("inf")
+
+
+def build_self_improve_prompt(comments: list[dict[str, Any]]) -> str:
+    instructions = SELF_IMPROVE_INSTRUCTIONS.replace(
+        "__MAX_NEW_ITEMS__", str(SELF_IMPROVE_MAX_NEW_ITEMS)
+    )
+
+    def _bullets(items: Any) -> str:
+        return _format_bullets(items) or "  (none)"
+
+    style = str(_user_config.get("reviewer_style") or "").strip() or "(none)"
+    learned = _user_config.get("learned_guidance") or []
+    learned_texts = [
+        (x.get("text") if isinstance(x, dict) else str(x))
+        for x in learned
+    ]
+
+    parts: list[str] = [
+        instructions,
+        "\n\n=== REVIEWER'S CURRENT GUIDANCE ===\n",
+        f"Codebase: {_user_config.get('codebase_description', 'a software codebase')}\n",
+        "\n-- Focus areas (review_focus) --\n",
+        _bullets(_user_config.get("review_focus")),
+        "\n\n-- Never comment on (review_avoid) --\n",
+        _bullets(_user_config.get("review_avoid")),
+        "\n\n-- Reviewer style --\n",
+        f"  {style}\n",
+        "\n-- Previously learned bullets (do NOT duplicate these) --\n",
+        _bullets(learned_texts),
+        "\n\n=== OTHER REVIEWERS' COMMENTS (learn from these) ===\n",
+    ]
+    for i, c in enumerate(comments, 1):
+        loc = ""
+        if c.get("file"):
+            loc = f" on {c['file']}"
+            if c.get("line"):
+                loc += f":{c['line']}"
+        parts.append(
+            f"\n[{i}] PR #{c['pr_number']} — {c['author']} ({c['kind']}{loc}):\n"
+        )
+        indented = "\n".join("    " + ln for ln in (c["body"] or "").splitlines())
+        parts.append(indented + "\n")
+    parts.append("\n=== END ===\n\nReturn the JSON object now.")
+    return "".join(parts)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", default=DEFAULT_REPO)
@@ -2187,6 +2981,13 @@ def main() -> int:
     ap.add_argument("--only-pr", type=int, default=None,
                     help="Only review this PR number (must still be by a configured review author).")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--learn", action="store_true",
+                    help="Force the end-of-cycle self-improvement step "
+                         "(read other reviewers' comments and append learned "
+                         "guidance to config.json), bypassing the throttle "
+                         "and the config `self_improve` switch.")
+    ap.add_argument("--no-learn", action="store_true",
+                    help="Skip the self-improvement step even if enabled.")
     args = ap.parse_args()
 
     if not args.repo:
@@ -2225,18 +3026,28 @@ def main() -> int:
             logging.warning("PR #%s not in the open review_authors set",
                             args.only_pr)
 
+    # Whether to run the end-of-cycle learn step this run.
+    want_learn = (SELF_IMPROVE or args.learn) and not args.no_learn
+
     # Cheap-polling short-circuit: if nothing in the PR list has changed
     # since the last run (same set of PRs, same HEADs, same updatedAt
     # timestamps) we don't need to iterate. updatedAt advances on any
     # comment, review, push, or re-request, so this is safe.
     fingerprint = compute_prs_fingerprint(prs)
     last_fingerprint = state.get("__last_prs_fingerprint")
-    if (not args.force and args.only_pr is None
+    if (not args.force and args.only_pr is None and not args.learn
             and fingerprint == last_fingerprint and prs):
         logging.info(
             "PR list unchanged since last run (fingerprint=%s); skipping per-PR work",
             fingerprint[:12],
         )
+        # The learn step still runs (throttled) so a quiet PR list doesn't
+        # starve self-improvement — other reviewers' comments bump
+        # updatedAt anyway, but be robust to edge cases.
+        if want_learn:
+            status = maybe_self_improve(args.repo, prs, state, args.dry_run,
+                                        forced=args.learn)
+            logging.info("Self-improve: %s", status)
         print("\nNo changes since last run.")
         return 0
     state["__last_prs_fingerprint"] = fingerprint
@@ -2283,6 +3094,16 @@ def main() -> int:
     print("\nSummary:")
     for num, status in results:
         print(f"  PR #{num}: {status}")
+
+    # End-of-cycle learn step: study other reviewers' comments and fold any
+    # generalizable lessons into config.json `learned_guidance` + the memory
+    # wiki. No-op unless enabled; throttled unless --learn forces it.
+    if want_learn:
+        li_status = maybe_self_improve(args.repo, prs, state, args.dry_run,
+                                       forced=args.learn)
+        logging.info("Self-improve: %s", li_status)
+        print(f"\nSelf-improve: {li_status}")
+
     return 0
 
 
