@@ -21,6 +21,12 @@
     "translation file ordering"
   ],
   "reviewer_style": "Be direct and senior-engineer terse. Prefer one concrete fix over three vague suggestions. Never ask the author to 'consider' something without saying what and why.",
+  "_comment_flag_core_functionality_changes": "When true, the reviewer estimates how much of the app's core functionality (see core_functionality_description) a PR changes; it forces request_changes and labels the PR '🚩 needs human review' ONLY when that estimate is >= core_functionality_block_threshold_pct. Lower-impact / hidden core changes decide normally (and may be auto-approved). Off by default.",
+  "flag_core_functionality_changes": false,
+  "core_functionality_description": "the product's core / main-page functionality — anything prominent on the main page and primary surfaces users interact with directly — plus core business logic, critical execution paths, public API / interface contracts, data models or schemas, persistence, and authentication / authorization",
+  "core_functionality_block_threshold_pct": 70,
+  "_comment_auto_approve": "When false, the bot never posts an APPROVE review — an approve decision is submitted as a non-blocking COMMENT so you approve PRs manually. Default true preserves auto-approve.",
+  "auto_approve": true,
   "_comment_self_improve": "When true, at the end of each cycle the tool reads OTHER reviewers' comments on the in-scope PRs, asks the model for generalizable improvements to its own reviewer prompt, and appends them to learned_guidance below (and to the memory/ wiki). Off by default. Force a one-off run with `python auto_review.py --learn`.",
   "self_improve": false,
   "self_improve_min_interval_hours": 20,

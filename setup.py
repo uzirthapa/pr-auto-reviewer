@@ -700,7 +700,56 @@ and depth you want. Skip if you're happy with the defaults.
     elif "reviewer_style" in cfg:
         cfg.pop("reviewer_style")
 
-    _print_header("8) Self-improvement (learn from other reviewers)")
+    _print_header("8) Review gates (core-functionality block + manual approval)")
+    print("""
+Two optional gates that change how the reviewer posts verdicts:
+
+  a) Core-functionality block: the reviewer estimates how much of your app's
+     core / main-page functionality a PR changes. Only HIGH-IMPACT changes
+     (at/above a percentage threshold you pick) are forced to REQUEST CHANGES
+     and labeled "needs human review". Lower-impact / hidden core changes
+     decide normally and can still be auto-approved.
+
+  b) Manual approval: never auto-approve. When the reviewer would approve,
+     it posts a non-blocking COMMENT instead, leaving the real approval to
+     you.
+
+Both are off by default (the bot reviews and can auto-approve as before).
+""".rstrip())
+    flag_core = _ask_yes_no(
+        "Block HIGH-IMPACT core-functionality changes and flag them for human review?",
+        default=bool(existing.get("flag_core_functionality_changes", False)),
+        non_interactive=non_interactive,
+    )
+    cfg["flag_core_functionality_changes"] = flag_core
+    if flag_core:
+        core_desc = _ask(
+            "What counts as 'core functionality'? (blank for a sensible default)",
+            default=existing.get("core_functionality_description", ""),
+            non_interactive=non_interactive,
+        )
+        if core_desc:
+            cfg["core_functionality_description"] = core_desc
+        elif "core_functionality_description" in cfg:
+            cfg.pop("core_functionality_description")
+        thr = _ask(
+            "Block when >= this %% of core functionality changes (0-100)",
+            default=str(existing.get("core_functionality_block_threshold_pct", 70)),
+            non_interactive=non_interactive,
+        )
+        try:
+            cfg["core_functionality_block_threshold_pct"] = max(0, min(100, int(thr)))
+        except (TypeError, ValueError):
+            cfg["core_functionality_block_threshold_pct"] = 70
+
+    auto_approve = _ask_yes_no(
+        "Allow the bot to auto-approve PRs? (No = you approve manually)",
+        default=bool(existing.get("auto_approve", True)),
+        non_interactive=non_interactive,
+    )
+    cfg["auto_approve"] = auto_approve
+
+    _print_header("9) Self-improvement (learn from other reviewers)")
     print("""
 At the end of each cycle the tool can read the comments OTHER (human)
 reviewers leave on the same PRs, ask the model which recurring issues they

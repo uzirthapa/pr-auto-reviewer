@@ -86,6 +86,36 @@ injected into the review prompt on later cycles via the
 - Defaults preserve byte-for-byte behavior when `config.json` is missing:
   disabled → the review prompt renders identically to before.
 
+## Review gates (both opt-in, off by default)
+
+Two optional gates layer on top of the normal review flow. Both default OFF
+so a missing `config.json` reproduces the original behavior byte-for-byte.
+
+- **Core-functionality gate** (`flag_core_functionality_changes`, plus the
+  tunable `core_functionality_description` and
+  `core_functionality_block_threshold_pct`, default 70). When on, the prompts
+  gain `core_functionality_change` (bool) and `core_functionality_change_pct`
+  (0-100 estimate) fields (injected via the `__CORE_FUNCTIONALITY_SCHEMA__` /
+  `__CORE_FUNCTIONALITY_BLOCK__` tokens in both `REVIEW_INSTRUCTIONS_TEMPLATE`
+  and `RECONSIDER_INSTRUCTIONS`, rendered by `_render_core_functionality_block`
+  / `_render_reconsider_instructions`). `_validate_review` coerces the decision
+  to `request_changes` **only when the estimated % of core functionality
+  changed is >= the threshold** (high-impact); lower-impact / hidden core
+  changes decide normally and may still be auto-approved. The metrics row
+  carries `core_functionality_change` / `core_functionality_change_pct` /
+  `needs_human_review`, and `daily_report._needs_human_review_html` renders a
+  prominent 🚩 banner for the blocked (high-impact) ones.
+
+- **Manual-approval gate** (`auto_approve`, default `true`). When `false`, the
+  bot never posts an `APPROVE` event: `_effective_event` downgrades an
+  `approve` decision to a non-blocking `COMMENT` at POST time, so a human
+  approves manually. This is a **posting-layer** change only — the model's
+  decision space stays binary (initial) / three-state (reconsider); do NOT
+  treat this as expanding the model contract. On reconsider, a held-approve
+  (or a `comment`) after a prior block dismisses the bot's own
+  `CHANGES_REQUESTED` (see the generalized `_effective_event(...)=="COMMENT"`
+  condition in `reconsider_pr`).
+
 ## Files
 
 | File                                          | Role                                                                 |

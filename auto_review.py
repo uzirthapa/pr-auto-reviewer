@@ -71,6 +71,38 @@ DEFAULT_REPO = _user_config.get("repo", "")
 # ACTIVE_REPO so a run against another repo is labeled correctly.
 ACTIVE_REPO = DEFAULT_REPO
 
+# --- Optional review-behavior gates (both OFF by default so a missing
+# config.json reproduces the original behavior byte-for-byte). ---
+
+# When true, the model estimates how much of the application's core
+# functionality a PR changes; a PR is forced to `request_changes` (and
+# labeled "needs human review" in the daily report) ONLY when that estimate
+# meets/exceeds CORE_BLOCK_THRESHOLD_PCT. Lower-impact / hidden core changes
+# are left to decide normally (and may be auto-approved). See
+# _render_core_functionality_block.
+FLAG_CORE_CHANGES = bool(_user_config.get("flag_core_functionality_changes", False))
+
+# What counts as "core functionality" for the gate above. Tunable so each
+# install can point it at its own critical paths / prominent surfaces.
+CORE_FUNCTIONALITY_DESCRIPTION = str(_user_config.get(
+    "core_functionality_description",
+    "the product's core business logic, critical execution paths, public "
+    "API / interface contracts, data models or schemas, "
+    "persistence / storage, authentication / authorization, or "
+    "money / billing logic",
+)).strip()
+
+# Block threshold: a core-functionality change is only blocked for human
+# review when the model's estimated percentage of core functionality changed
+# is >= this value. Below it, low-impact / hidden changes decide normally.
+CORE_BLOCK_THRESHOLD_PCT = int(_user_config.get(
+    "core_functionality_block_threshold_pct", 70))
+
+# When false, the bot never submits an APPROVE event: an `approve` decision
+# is posted as a non-blocking COMMENT instead, leaving the actual approval
+# to a human. Default true preserves the original auto-approve behavior.
+AUTO_APPROVE = bool(_user_config.get("auto_approve", True))
+
 # Cap on diff size sent to the model (characters). Very large PRs are
 # truncated so we still get an architecture-level review instead of
 # blowing up the prompt.
@@ -691,7 +723,7 @@ JSON to stdout. After writing the file, your job is done. The JSON must
 match this schema:
 
 {
-  "decision": "approve" | "request_changes",
+  "decision": "approve" | "request_changes",__CORE_FUNCTIONALITY_SCHEMA__
   "summary": "<3-8 sentence overall review covering correctness, architecture, and risk>",
   "comments": [
     {
@@ -862,7 +894,7 @@ Large-file opportunities (independent of the baseline file):
     adding/raising that file's entry in
     `scripts/file-line-limit-baseline.json`, in which case follow
     the rule above and block with severity="required".
-__CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK____LEARNED_GUIDANCE_BLOCK__
+__CUSTOM_FOCUS_BLOCK____CUSTOM_AVOID_BLOCK____REVIEWER_STYLE_BLOCK____LEARNED_GUIDANCE_BLOCK____CORE_FUNCTIONALITY_BLOCK__
 Strict rules for comments:
   - Be specific. Reference the file and what the code does. No "consider
     extracting this" without saying what and why.
@@ -932,6 +964,47 @@ def _render_learned_guidance_block(items: Any) -> str:
     return "".join(parts)
 
 
+def _render_core_functionality_block() -> tuple[str, str]:
+    """Render the two core-functionality gate tokens.
+
+    Returns (schema_fragment, instructions_block). Both are "" when the
+    gate is disabled, so a config-less install sees the original prompt
+    byte-for-byte. When enabled, the model estimates how much of the
+    application's core functionality the PR changes; only HIGH-IMPACT
+    changes (>= CORE_BLOCK_THRESHOLD_PCT) are blocked for human review,
+    while low-impact / hidden changes decide normally.
+    """
+    if not FLAG_CORE_CHANGES:
+        return "", ""
+    schema = (
+        '\n  "core_functionality_change": true | false,'
+        '\n  "core_functionality_change_pct": <integer 0-100>,'
+    )
+    block = (
+        "\nCore-functionality gate (human review for HIGH-IMPACT changes only):\n"
+        f"  - \"Core functionality\" = {CORE_FUNCTIONALITY_DESCRIPTION}.\n"
+        "  - Pay special attention to anything visible on the MAIN PAGE /\n"
+        "    primary surface of the application — prominent, user-facing\n"
+        "    behavior most users interact with directly. Treat changes to\n"
+        "    that surface as core.\n"
+        "  - Set \"core_functionality_change\" to true if the PR touches core /\n"
+        "    main-page functionality at all, else false. Estimate what\n"
+        "    percentage (0-100) of the application's core functionality this\n"
+        "    PR changes and put it in \"core_functionality_change_pct\" (0 when\n"
+        "    it touches no core functionality).\n"
+        f"  - If \"core_functionality_change_pct\" is >= {CORE_BLOCK_THRESHOLD_PCT}, "
+        "this is a high-impact\n"
+        "    change: set \"decision\" to \"request_changes\" and add a\n"
+        "    severity=\"required\" comment naming exactly which core / main-page\n"
+        "    behavior changed and why a human must review it before merge.\n"
+        f"  - If the estimate is below {CORE_BLOCK_THRESHOLD_PCT}% — or the change is "
+        "small, hidden,\n"
+        "    behind a flag, or otherwise low-impact — do NOT block on this\n"
+        "    basis. Decide normally (it may be auto-approved).\n"
+    )
+    return schema, block
+
+
 def _render_review_instructions() -> str:
     """Render REVIEW_INSTRUCTIONS_TEMPLATE with per-install config injected.
 
@@ -961,6 +1034,8 @@ def _render_review_instructions() -> str:
         f"\nReviewer style preferences: {style}\n" if style else ""
     )
 
+    core_schema, core_block = _render_core_functionality_block()
+
     return (
         REVIEW_INSTRUCTIONS_TEMPLATE
         .replace("__CODEBASE_DESCRIPTION__", codebase)
@@ -968,6 +1043,8 @@ def _render_review_instructions() -> str:
         .replace("__CUSTOM_AVOID_BLOCK__", custom_avoid_block)
         .replace("__REVIEWER_STYLE_BLOCK__", reviewer_style_block)
         .replace("__LEARNED_GUIDANCE_BLOCK__", learned_block)
+        .replace("__CORE_FUNCTIONALITY_SCHEMA__", core_schema)
+        .replace("__CORE_FUNCTIONALITY_BLOCK__", core_block)
     )
 
 
@@ -1048,6 +1125,12 @@ def _validate_review(obj: Any, *, allow_comment: bool = False) -> dict[str, Any]
     if not isinstance(obj, dict):
         raise ValueError("review must be a JSON object")
     decision = obj.get("decision")
+    core_change = bool(obj.get("core_functionality_change"))
+    try:
+        core_pct = int(obj.get("core_functionality_change_pct"))
+    except (TypeError, ValueError):
+        core_pct = 0
+    core_pct = max(0, min(100, core_pct))
     # Initial reviews are binary (approve / request_changes). Reconsiders
     # additionally allow "comment" to drop a prior block without
     # endorsing the PR (used when the author gave a rationale we don't
@@ -1063,6 +1146,20 @@ def _validate_review(obj: Any, *, allow_comment: bool = False) -> dict[str, Any]
             decision = "approve"
     if decision not in valid:
         raise ValueError(f"invalid decision: {decision!r}")
+    # Core-functionality gate: block for human review ONLY when the change is
+    # high-impact — i.e. the estimated share of core functionality changed
+    # meets the configured threshold. Lower-impact / hidden core changes are
+    # left to decide normally (and may be auto-approved).
+    needs_human_review = bool(
+        FLAG_CORE_CHANGES and core_change
+        and core_pct >= CORE_BLOCK_THRESHOLD_PCT
+    )
+    if needs_human_review and decision != "request_changes":
+        logging.info(
+            "core change ~%d%% >= %d%% threshold; coercing decision %r -> request_changes",
+            core_pct, CORE_BLOCK_THRESHOLD_PCT, decision,
+        )
+        decision = "request_changes"
     obj["decision"] = decision
     summary = (obj.get("summary") or "").strip()
     if not summary:
@@ -1091,7 +1188,10 @@ def _validate_review(obj: Any, *, allow_comment: bool = False) -> dict[str, Any]
         elif isinstance(ln, str) and ln.strip().isdigit():
             entry["line"] = int(ln.strip())
         norm.append(entry)
-    return {"decision": decision, "summary": summary, "comments": norm}
+    return {"decision": decision, "summary": summary, "comments": norm,
+            "core_functionality_change": core_change,
+            "core_functionality_change_pct": core_pct,
+            "needs_human_review": needs_human_review}
 
 
 def _validate_reconsider_NEW_REMOVED(obj: Any) -> dict[str, Any]:
@@ -1264,6 +1364,16 @@ def _verdict_header(decision: str) -> str:
     }[decision]
 
 
+def _manual_approval_note(decision: str) -> str:
+    """A body note shown when an `approve` decision is held back from an
+    actual GitHub approval because AUTO_APPROVE is off. Empty otherwise."""
+    if decision == "approve" and not AUTO_APPROVE:
+        return ("\n> ℹ️ Auto-approval is disabled — this is posted as a "
+                "non-blocking comment. A human must approve this PR manually "
+                "before merge.\n")
+    return ""
+
+
 def format_review_body(pr: PullRequest, review: dict[str, Any],
                        general_comments: list[dict[str, Any]] | None = None) -> str:
     parts = [
@@ -1273,6 +1383,9 @@ def format_review_body(pr: PullRequest, review: dict[str, Any],
         "### Summary\n",
         review["summary"].rstrip() + "\n",
     ]
+    note = _manual_approval_note(review["decision"])
+    if note:
+        parts.append(note)
     if general_comments:
         parts.append("\n### Additional notes\n")
         for c in general_comments:
@@ -1297,6 +1410,9 @@ def format_reconsider_body(pr: PullRequest, review: dict[str, Any],
         "### Summary\n",
         review["summary"].rstrip() + "\n",
     ]
+    note = _manual_approval_note(review["decision"])
+    if note:
+        parts.append(note)
     if review.get("remaining_concerns"):
         parts.append("\n### Remaining concerns\n")
         for r in review["remaining_concerns"]:
@@ -1309,6 +1425,23 @@ def format_reconsider_body(pr: PullRequest, review: dict[str, Any],
     return "".join(parts)
 
 
+def _effective_event(decision: str) -> str:
+    """Map a model decision to the GitHub review event we actually POST.
+
+    Honors the AUTO_APPROVE gate: when auto-approve is disabled, an
+    `approve` decision is downgraded to a non-blocking COMMENT so the bot
+    never green-checks a PR — a human approves manually.
+    """
+    event = {
+        "approve": "APPROVE",
+        "request_changes": "REQUEST_CHANGES",
+        "comment": "COMMENT",
+    }[decision]
+    if event == "APPROVE" and not AUTO_APPROVE:
+        return "COMMENT"
+    return event
+
+
 def submit_review_via_api(repo: str, pr: PullRequest, review: dict[str, Any],
                           body: str) -> str | None:
     """POST a review with inline comments + general body via GH REST API.
@@ -1317,17 +1450,12 @@ def submit_review_via_api(repo: str, pr: PullRequest, review: dict[str, Any],
     on hunks that actually appear in the diff; unmappable entries are
     folded back into the body's "Additional notes" section by the caller.
     """
-    event_map = {
-        "approve": "APPROVE",
-        "request_changes": "REQUEST_CHANGES",
-        "comment": "COMMENT",
-    }
     valid = parse_diff_right_lines(pr.diff)
     inline, _ = _split_inline_vs_general(review, valid)
 
     payload = {
         "commit_id": pr.head_sha,
-        "event": event_map[review["decision"]],
+        "event": _effective_event(review["decision"]),
         "body": body,
         "comments": inline,
     }
@@ -1623,7 +1751,7 @@ You MUST write your response as a JSON object to a file named
 JSON to stdout. The JSON must match this schema:
 
 {
-  "decision": "approve" | "request_changes" | "comment",
+  "decision": "approve" | "request_changes" | "comment",__CORE_FUNCTIONALITY_SCHEMA__
   "summary": "<3-8 sentences: what changed since your last review and why
               your decision stands or has changed>",
   "comments": [
@@ -1724,8 +1852,47 @@ Rules:
     blocking. If the author has now split the file and lowered (or
     removed) the entry, treat that blocker as ADDRESSED.
 
-Write the JSON object to `review_output.json` now.
+__CORE_FUNCTIONALITY_BLOCK__Write the JSON object to `review_output.json` now.
 """
+
+
+def _render_reconsider_instructions() -> str:
+    """Render RECONSIDER_INSTRUCTIONS with the optional core-functionality
+    gate injected. Returns the original text byte-for-byte when the gate is
+    disabled."""
+    if not FLAG_CORE_CHANGES:
+        return (
+            RECONSIDER_INSTRUCTIONS
+            .replace("__CORE_FUNCTIONALITY_SCHEMA__", "")
+            .replace("__CORE_FUNCTIONALITY_BLOCK__", "")
+        )
+    schema = (
+        '\n  "core_functionality_change": true | false,'
+        '\n  "core_functionality_change_pct": <integer 0-100>,'
+    )
+    block = (
+        "Core-functionality gate (human review for HIGH-IMPACT changes only):\n"
+        f"  - \"Core functionality\" = {CORE_FUNCTIONALITY_DESCRIPTION}. Pay special\n"
+        "    attention to anything on the MAIN PAGE / primary surface of the\n"
+        "    application.\n"
+        "  - Set \"core_functionality_change\" true/false for whether the CURRENT\n"
+        "    diff touches core / main-page functionality, and estimate the\n"
+        "    percentage of core functionality it changes in\n"
+        "    \"core_functionality_change_pct\" (0-100).\n"
+        f"  - If that estimate is >= {CORE_BLOCK_THRESHOLD_PCT}, keep \"decision\" at "
+        "\"request_changes\"\n"
+        "    with a severity=\"required\" comment — a human must review\n"
+        "    high-impact core changes before merge, regardless of author\n"
+        "    rationale. Do not drop this block to \"comment\" or \"approve\".\n"
+        f"  - If the estimate is below {CORE_BLOCK_THRESHOLD_PCT}% (low-impact / hidden), "
+        "do NOT block on\n"
+        "    this basis — decide normally.\n\n"
+    )
+    return (
+        RECONSIDER_INSTRUCTIONS
+        .replace("__CORE_FUNCTIONALITY_SCHEMA__", schema)
+        .replace("__CORE_FUNCTIONALITY_BLOCK__", block)
+    )
 
 
 def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
@@ -1752,7 +1919,7 @@ def build_reconsider_prompt(pr: PullRequest, prior: dict[str, Any],
         return "\n".join(items) if items else "  (none)"
 
     parts: list[str] = [
-        RECONSIDER_INSTRUCTIONS,
+        _render_reconsider_instructions(),
         "\n\n=== PULL REQUEST ===\n",
         f"Repo: {ACTIVE_REPO}\n",
         f"PR #{pr.number}: {pr.title}\n",
@@ -2056,6 +2223,16 @@ def append_metrics(pr: PullRequest, review: dict[str, Any], *,
         "files_flagged": sorted({c.get("file") for c in comments if c.get("file")}),
         "artifact_path": artifact.name if artifact else None,
     }
+    # Core-functionality gate: label high-impact core changes that were
+    # blocked for human review, and keep the model's estimated % for detail.
+    record["core_functionality_change"] = bool(review.get("core_functionality_change"))
+    record["core_functionality_change_pct"] = review.get("core_functionality_change_pct") or 0
+    record["needs_human_review"] = bool(review.get("needs_human_review"))
+    # Approval gate: an `approve` decision that we held back to a COMMENT
+    # (AUTO_APPROVE off) still needs a human to approve on GitHub.
+    record["manual_approval_pending"] = (
+        review.get("decision") == "approve" and not AUTO_APPROVE
+    )
     if kind == "reconsider":
         remaining = review.get("remaining_concerns") or []
         record["prior_decision"] = prior_decision
@@ -2226,21 +2403,28 @@ def reconsider_pr(repo: str, pr: PullRequest, state: dict[str, Any],
         logging.info("Posted reconsider %s on PR #%s (review_id=%s, inline=%d, general=%d)",
                      review["decision"], pr.number, review_id, len(inline), len(general))
 
-        # If we just transitioned from request_changes -> comment, the
-        # author gave a rationale we don't fully agree with but we no
-        # longer want to block. A COMMENT review alone may not clear the
-        # prior CHANGES_REQUESTED on branch-protection rules, so
-        # explicitly dismiss our last blocking review.
-        if (review["decision"] == "comment"
+        # If our new review no longer objects but also isn't posting an
+        # actual APPROVE (either a "comment" verdict, or an "approve" held
+        # back to a COMMENT because AUTO_APPROVE is off), the prior
+        # CHANGES_REQUESTED would otherwise linger on branch-protection
+        # rules. Explicitly dismiss our last blocking review so its red X
+        # clears; final approval is left to a human.
+        if (_effective_event(review["decision"]) == "COMMENT"
                 and (prev.get("decision") or "").lower() == "request_changes"):
+            if review["decision"] == "comment":
+                msg = ("Dropping prior changes-requested in favor of a "
+                       "comment-only review — author provided a rationale "
+                       "I don't fully agree with but won't block on. "
+                       "See follow-up review for details.")
+            else:
+                msg = ("Dropping prior changes-requested — the automated "
+                       "reviewer's concerns are resolved. Auto-approval is "
+                       "disabled, so final approval is left to a human.")
             blocking_id = find_my_latest_blocking_review_id(repo, pr.number)
             if blocking_id and blocking_id != str(review_id):
                 ok = dismiss_review(
                     repo, pr.number, blocking_id,
-                    message=("Dropping prior changes-requested in favor of a "
-                             "comment-only review — author provided a rationale "
-                             "I don't fully agree with but won't block on. "
-                             "See follow-up review for details."),
+                    message=msg,
                 )
                 logging.info("Dismissed prior blocking review %s on PR #%s: %s",
                              blocking_id, pr.number, "ok" if ok else "FAILED")

@@ -183,6 +183,47 @@ def _learned_blurb_html(learn_records: list[dict]) -> str:
 </div>"""
 
 
+def _needs_human_review_html(by_pr: dict[int, dict]) -> str:
+    """Prominent call-out listing PRs whose latest verdict flagged a core
+    functionality change. These are blocked and require a human to review
+    and (with auto-approval off) approve them manually. Returns "" when
+    none are flagged."""
+    flagged = [
+        slot["latest"] for slot in by_pr.values()
+        if slot["latest"].get("needs_human_review")
+    ]
+    if not flagged:
+        return ""
+    flagged.sort(key=lambda r: r["_ts"], reverse=True)
+    items = []
+    for r in flagged:
+        n = r.get("pr_number")
+        url = escape(r.get("pr_url") or "#")
+        author = escape(r.get("pr_author") or "?")
+        title = escape(r.get("pr_title") or "")
+        pct = r.get("core_functionality_change_pct")
+        pct_txt = f" · ~{pct}% of core changed" if pct else ""
+        items.append(
+            f'<li style="margin:3px 0;">'
+            f'<a href="{url}" style="text-decoration:none;font-weight:600;">#{n}</a>'
+            f' <span style="color:#57606a;">· {author}'
+            f'{(" · " + title) if title else ""}{pct_txt}</span></li>'
+        )
+    return f"""
+<div style="border:2px solid #9a6700;border-radius:6px;background:#fff8c5;
+            padding:12px 16px;margin:0 0 18px 0;color:#1f2328;">
+  <div style="font-weight:700;color:#9a6700;font-size:15px;margin-bottom:4px;">
+    🚩 {len(flagged)} PR(s) need human review — high-impact core functionality change
+  </div>
+  <div style="font-size:14px;line-height:1.45;">
+    These PRs change a large share of core / main-page functionality and were
+    <strong>blocked</strong> by the automated reviewer. A human must review
+    (and approve) them before merge.
+    <ul style="margin:6px 0 0 18px;padding:0;">{''.join(items)}</ul>
+  </div>
+</div>"""
+
+
 def render_html(records: list[dict], hours: int) -> str:
     now_local = datetime.now().strftime("%a %b %d %Y %H:%M %Z").strip()
     banner = _migration_banner_html()
@@ -247,6 +288,12 @@ def render_html(records: list[dict], hours: int) -> str:
                 trig_parts.append("author replies")
             if trig_parts:
                 notes.append("triggered by " + ", ".join(trig_parts))
+        if latest.get("needs_human_review"):
+            _pct = latest.get("core_functionality_change_pct")
+            _pct_txt = f" (~{_pct}% of core)" if _pct else ""
+            notes.append(f"🚩 core functionality change{_pct_txt} — needs human review")
+        if latest.get("manual_approval_pending"):
+            notes.append("not yet approved on GitHub — awaiting manual approval")
         if latest.get("dry_run"):
             notes.append("dry-run")
         notes_html = ("<br/><span style='color:#57606a;font-size:12px;'>"
@@ -312,9 +359,12 @@ def render_html(records: list[dict], hours: int) -> str:
             + "".join(reason_blocks)
         )
 
+    needs_human_html = _needs_human_review_html(by_pr)
+
     return f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#1f2328;max-width:980px;">
 <h2 style="margin-bottom:4px;">🤖 Agentic-Automations Auto-Review — daily report</h2>
 {banner}
+{needs_human_html}
 <p style="color:#57606a;margin-top:0;">Window: last {hours}h (as of {escape(now_local)}).</p>
 
 <table style="border-collapse:collapse;margin:12px 0 18px 0;">
